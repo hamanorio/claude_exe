@@ -33,7 +33,7 @@
         </section>
 
         <section class="contact-section">
-            <form class="contact-form" action="#" method="post">
+            <form class="contact-form" id="contact-form">
                 <div class="form-group">
                     <label for="name">お名前</label>
                     <input type="text" id="name" name="name" required>
@@ -52,7 +52,12 @@
                 </div>
                 <button type="submit" class="submit-btn">送信する</button>
             </form>
-            <p class="form-note">※ このフォームは練習用です。実際には送信されません。</p>
+            <p id="form-success" style="display:none; color: #2563eb; font-weight: bold; margin-top: 1rem;">
+                送信しました！ご連絡ありがとうございます。
+            </p>
+            <p id="form-error" style="display:none; color: #dc2626; margin-top: 1rem;">
+                送信に失敗しました。時間をおいて再度お試しください。
+            </p>
         </section>
     </main>
 
@@ -61,5 +66,28 @@
     </footer>
 
     <script src="js/main.js"></script>
+    <script>
+        document.getElementById('contact-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const btn = this.querySelector('.submit-btn');
+            btn.textContent = '送信中...';
+            btn.disabled = true;
+
+            const res = await fetch('https://formspree.io/f/xeenkpzo', {
+                method: 'POST',
+                body: new FormData(this),
+                headers: { 'Accept': 'application/json' }
+            });
+
+            if (res.ok) {
+                this.style.display = 'none';
+                document.getElementById('form-success').style.display = 'block';
+            } else {
+                document.getElementById('form-error').style.display = 'block';
+                btn.textContent = '送信する';
+                btn.disabled = false;
+            }
+        });
+    </script>
 </body>
 </html>
