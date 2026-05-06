@@ -40,15 +40,8 @@
 
         <section class="latest-posts">
             <h2>最新の記事</h2>
-            <div class="post-grid">
-                <!-- LATEST_POST_START -->
-                <article class="post-card">
-                    <div class="post-date">2026年1月28日</div>
-                    <h3><a href="blog/post2.html">今日の散歩</a></h3>
-                    <p>今日の朝の散歩は武庫川でした。プルくんと思いっきり遊びました。</p>
-                    <a href="blog/post2.html" class="read-more">続きを読む →</a>
-                </article>
-                <!-- LATEST_POST_END -->
+            <div id="latest-posts-grid" class="post-grid">
+                <p class="loading">読み込み中...</p>
             </div>
             <a href="blog.html" class="view-all">すべての記事を見る →</a>
         </section>
@@ -58,6 +51,32 @@
         <p>&copy; 2026 My Home. All rights reserved.</p>
     </footer>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="js/supabase.js"></script>
     <script src="js/main.js"></script>
+    <script>
+        (async () => {
+            const grid = document.getElementById('latest-posts-grid');
+            const { data: posts, error } = await db
+                .from('posts')
+                .select('id, title, date, summary')
+                .order('date', { ascending: false })
+                .limit(3);
+
+            if (error || !posts?.length) {
+                grid.innerHTML = '<p>記事がありません。</p>';
+                return;
+            }
+
+            grid.innerHTML = posts.map(post => `
+                <article class="post-card">
+                    <div class="post-date">${formatDate(post.date)}</div>
+                    <h3><a href="blog/post.html#${post.id}">${post.title}</a></h3>
+                    <p>${post.summary || ''}</p>
+                    <a href="blog/post.html#${post.id}" class="read-more">続きを読む →</a>
+                </article>
+            `).join('');
+        })();
+    </script>
 </body>
 </html>

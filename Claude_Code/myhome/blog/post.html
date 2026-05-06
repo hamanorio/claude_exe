@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>記事 - My Blog</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <header>
+        <nav class="navbar">
+            <div class="logo">
+                <a href="../index.html">My Home</a>
+            </div>
+            <ul class="nav-links">
+                <li><a href="../index.html">ホーム</a></li>
+                <li><a href="../about.html">自己紹介</a></li>
+                <li><a href="../blog.html" class="active">ブログ</a></li>
+                <li><a href="../contact.html">お問い合わせ</a></li>
+            </ul>
+            <button class="menu-toggle" aria-label="メニュー">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+        </nav>
+    </header>
+
+    <main id="post-main">
+        <p class="loading">読み込み中...</p>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 My Home. All rights reserved.</p>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="../js/supabase.js?v=2"></script>
+    <script src="../js/main.js"></script>
+    <script>
+        (async () => {
+            const main = document.getElementById('post-main');
+            const id = location.hash.slice(1);
+
+            if (!id) {
+                main.innerHTML = '<p>記事が見つかりません。</p>';
+                return;
+            }
+
+            const { data: post, error } = await db
+                .from('posts')
+                .select('*')
+                .eq('id', id)
+                .single();
+
+            if (error || !post) {
+                main.innerHTML = '<p>記事が見つかりません。</p>';
+                return;
+            }
+
+            document.title = `${post.title} - My Blog`;
+
+            const images = Array.isArray(post.images) ? post.images : [];
+            const imagesHTML = images.map(filename => `
+                <figure>
+                    <img src="${imageUrl(filename)}" alt="${post.title}">
+                </figure>
+            `).join('');
+
+            const videos = Array.isArray(post.videos) ? post.videos : [];
+            const videosHTML = videos.map(filename => `
+                <figure>
+                    <video controls playsinline>
+                        <source src="${imageUrl(filename)}">
+                    </video>
+                </figure>
+            `).join('');
+
+            main.innerHTML = `
+                <article class="blog-post">
+                    <div class="post-header">
+                        <h1>${post.title}</h1>
+                        <p class="post-meta">${formatDate(post.date)}</p>
+                    </div>
+                    <div class="post-content">
+                        <p>${post.content || ''}</p>
+                        ${imagesHTML}
+                        ${videosHTML}
+                    </div>
+                    <div class="post-footer">
+                        <a href="../blog.html" class="back-link">&larr; ブログ一覧に戻る</a>
+                    </div>
+                </article>
+            `;
+        })();
+    </script>
+</body>
+</html>

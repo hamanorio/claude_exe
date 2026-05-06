@@ -32,21 +32,8 @@
             <p>日々の学びと発見を記録しています</p>
         </section>
 
-        <section class="blog-list">
-            <!-- BLOG_LIST_START -->
-            <article class="blog-item">
-                <div class="blog-date">2026年1月28日</div>
-                <h2><a href="blog/post2.html">今日の散歩</a></h2>
-                <p>今日の朝の散歩は武庫川でした。プルくんと思いっきり遊びました。</p>
-                <a href="blog/post2.html" class="read-more">続きを読む →</a>
-            </article>
-            <!-- BLOG_LIST_NEW -->
-            <article class="blog-item">
-                <div class="blog-date">2026年1月28日</div>
-                <h2><a href="blog/post1.html">はじめての投稿</a></h2>
-                <p>ブログを始めました。これから様々なことを発信していきます。どうぞよろしくお願いします。</p>
-                <a href="blog/post1.html" class="read-more">続きを読む →</a>
-            </article>
+        <section class="blog-list" id="blog-list">
+            <p class="loading">読み込み中...</p>
         </section>
     </main>
 
@@ -54,6 +41,31 @@
         <p>&copy; 2026 My Home. All rights reserved.</p>
     </footer>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="js/supabase.js"></script>
     <script src="js/main.js"></script>
+    <script>
+        (async () => {
+            const list = document.getElementById('blog-list');
+            const { data: posts, error } = await db
+                .from('posts')
+                .select('id, title, date, summary')
+                .order('date', { ascending: false });
+
+            if (error || !posts?.length) {
+                list.innerHTML = '<p>記事がありません。</p>';
+                return;
+            }
+
+            list.innerHTML = posts.map(post => `
+                <article class="blog-item">
+                    <div class="blog-date">${formatDate(post.date)}</div>
+                    <h2><a href="blog/post.html#${post.id}">${post.title}</a></h2>
+                    <p>${post.summary || ''}</p>
+                    <a href="blog/post.html#${post.id}" class="read-more">続きを読む →</a>
+                </article>
+            `).join('');
+        })();
+    </script>
 </body>
 </html>

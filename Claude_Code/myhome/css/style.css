@@ -338,6 +338,13 @@ main {
     margin-bottom: 0.5rem;
 }
 
+.post-content figure video {
+    width: 100%;
+    max-width: 100%;
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+}
+
 .post-content figcaption {
     text-align: center;
     color: var(--text-light);
