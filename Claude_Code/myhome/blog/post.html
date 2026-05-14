@@ -69,13 +69,17 @@
             `).join('');
 
             const videos = Array.isArray(post.videos) ? post.videos : [];
-            const videosHTML = videos.map(filename => `
-                <figure>
-                    <video controls playsinline>
-                        <source src="${imageUrl(filename)}">
-                    </video>
-                </figure>
-            `).join('');
+            const videosHTML = videos.map(url => {
+                const match = url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+                if (!match) return '';
+                return `
+                <figure class="youtube-wrapper">
+                    <iframe src="https://www.youtube.com/embed/${match[1]}"
+                        frameborder="0" allowfullscreen
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture">
+                    </iframe>
+                </figure>`;
+            }).join('');
 
             main.innerHTML = `
                 <article class="blog-post">
