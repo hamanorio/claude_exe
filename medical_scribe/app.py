@@ -36,24 +36,43 @@
 使い方(ローカル環境):
     pip install streamlit openai-whisper openai pyannote.audio transformers accelerate
     streamlit run app.py
+
+使い方(Mac / Apple Silicon、メモリ16GB想定):
+    Swallow 8Bをbf16のままtransformersで載せると約16GBでメモリが足りないため、
+    4bit量子化(GGUF)したモデルをOllamaで動かし、文字起こしはmlx-whisperを使う。
+    1. Ollamaをインストール(https://ollama.com)
+    2. Swallow 8B InstructのGGUF(Q4_K_M推奨)をHugging Faceで探し、Ollamaに取り込む
+         ollama pull hf.co/<ユーザー名>/<GGUFリポジトリ名>:Q4_K_M
+       またはダウンロードしたGGUFから:
+         echo "FROM ./ファイル名.gguf" > Modelfile && ollama create swallow-8b -f Modelfile
+    3. pip install streamlit mlx-whisper openai
+    4. streamlit run app.py
+       サイドバーで「Whisperエンジン = mlx-whisper」「LLM = ローカル(Ollama・Mac向け)」を選び、
+       Ollamaのモデル名(`ollama list` で表示される名前)を入力する
 """
 
 import difflib
 import json
 import re
 import tempfile
+import urllib.request
 
 import streamlit as st
-import torch
-import whisper
 from openai import OpenAI
-from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# torch / transformers / whisper は使うバックエンドを選んだときだけ読み込む
+# (Mac + Ollama + mlx-whisper の構成ではインストール不要にするため)
+
+OLLAMA_URL = "http://localhost:11434/api/chat"
 
 st.set_page_config(page_title="診察音声→カルテ下書き プロトタイプ", layout="wide")
 
 
 @st.cache_resource
 def load_local_llm(model_path: str):
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
@@ -65,6 +84,8 @@ def load_local_llm(model_path: str):
 
 def generate_with_local_llm(prompt: str, model_path: str, max_new_tokens: int = 1024) -> str:
     """ローカルのSwallowモデルで生成する。クラウドAPIに患者データを送らずに済む。"""
+    import torch
+
     model, tokenizer = load_local_llm(model_path)
     messages = [{"role": "user", "content": prompt}]
     inputs = tokenizer.apply_chat_template(
@@ -80,6 +101,26 @@ def generate_with_local_llm(prompt: str, model_path: str, max_new_tokens: int = 
         )
     generated = output[0][inputs.shape[-1] :]
     return tokenizer.decode(generated, skip_special_tokens=True).strip()
+
+
+def generate_with_ollama(prompt: str, model_name: str, json_mode: bool = False) -> str:
+    """Mac上のOllama(量子化済みSwallow)で生成する。データはMacの外に出ない。"""
+    payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "options": {"temperature": 0, "repeat_penalty": 1.15, "num_ctx": 8192},
+    }
+    if json_mode:
+        payload["format"] = "json"
+    req = urllib.request.Request(
+        OLLAMA_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=600) as res:
+        body = json.loads(res.read().decode("utf-8"))
+    return body["message"]["content"].strip()
 
 
 def extract_json_block(text: str) -> dict:
@@ -98,6 +139,8 @@ def extract_json_block(text: str) -> dict:
 def run_llm(prompt: str, backend: str, api_key: str, local_model_path: str) -> str:
     if backend == "ローカル(Swallow)":
         return generate_with_local_llm(prompt, local_model_path)
+    if backend == "ローカル(Ollama・Mac向け)":
+        return generate_with_ollama(prompt, local_model_path)
     client = OpenAI(api_key=api_key)
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -106,17 +149,38 @@ def run_llm(prompt: str, backend: str, api_key: str, local_model_path: str) -> s
     return response.choices[0].message.content.strip()
 
 
+MLX_WHISPER_REPOS = {
+    "medium": "mlx-community/whisper-medium-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+}
+
+
 @st.cache_resource
 def load_whisper_model(model_size: str):
+    import whisper
+
     return whisper.load_model(model_size)
 
 
-def transcribe(audio_path: str, medical_terms: str, model_size: str):
+def transcribe(audio_path: str, medical_terms: str, model_size: str, engine: str = "openai-whisper"):
+    initial_prompt = f"これは医師と患者の診察会話です。次のような医学用語が含まれます: {medical_terms}"
+    if engine == "mlx-whisper":
+        # Apple SiliconのGPUで動く。出力形式(segments/avg_logprob等)はopenai-whisperと同じ
+        import mlx_whisper
+
+        return mlx_whisper.transcribe(
+            audio_path,
+            path_or_hf_repo=MLX_WHISPER_REPOS[model_size],
+            language="ja",
+            initial_prompt=initial_prompt,
+            condition_on_previous_text=False,
+        )
     model = load_whisper_model(model_size)
     result = model.transcribe(
         audio_path,
         language="ja",
-        initial_prompt=f"これは医師と患者の診察会話です。次のような医学用語が含まれます: {medical_terms}",
+        initial_prompt=initial_prompt,
         condition_on_previous_text=False,
     )
     return result
@@ -274,6 +338,10 @@ confidence フィールドには、その抽出の確信度を "high" または 
     if backend == "ローカル(Swallow)":
         raw_output = generate_with_local_llm(prompt, local_model_path)
         data = extract_json_block(raw_output)
+    elif backend == "ローカル(Ollama・Mac向け)":
+        # OllamaのJSONモードで出力をJSONに制約する(念のため抽出処理も通す)
+        raw_output = generate_with_ollama(prompt, local_model_path, json_mode=True)
+        data = extract_json_block(raw_output)
     else:
         client = OpenAI(api_key=api_key)
         response = client.chat.completions.create(
@@ -314,7 +382,13 @@ st.caption("AIの出力をそのまま信じず、怪しい箇所は音声に戻
 
 with st.sidebar:
     st.header("設定")
-    model_size = st.selectbox("Whisperモデルサイズ", ["medium", "large-v3"], index=1)
+    whisper_engine = st.radio(
+        "Whisperエンジン",
+        ["openai-whisper", "mlx-whisper"],
+        help="Mac(Apple Silicon)では mlx-whisper の方が大幅に速く動きます。",
+    )
+    whisper_sizes = ["medium", "large-v3", "large-v3-turbo"] if whisper_engine == "mlx-whisper" else ["medium", "large-v3"]
+    model_size = st.selectbox("Whisperモデルサイズ", whisper_sizes, index=len(whisper_sizes) - 1)
     medical_terms = st.text_area(
         "医学用語ヒント(initial_prompt用)",
         "呂律、構音障害、顔面神経麻痺、心房細動、不整脈、脂質異常症、浸潤影、湿性ラ音",
@@ -323,13 +397,21 @@ with st.sidebar:
     st.divider()
     llm_backend = st.radio(
         "②③④⑤で使うLLM",
-        ["OpenAI API (GPT-4o)", "ローカル(Swallow)"],
-        help="実在する患者データを扱う場合は越境移転の問題を避けるため「ローカル(Swallow)」を推奨します。",
+        ["OpenAI API (GPT-4o)", "ローカル(Swallow)", "ローカル(Ollama・Mac向け)"],
+        help="実在する患者データを扱う場合は越境移転の問題を避けるため、ローカルのいずれかを推奨します。"
+        "Macでは「ローカル(Ollama・Mac向け)」を使ってください。",
     )
     api_key = ""
     local_model_path = ""
     if llm_backend == "OpenAI API (GPT-4o)":
         api_key = st.text_input("OpenAI APIキー", type="password")
+    elif llm_backend == "ローカル(Ollama・Mac向け)":
+        local_model_path = st.text_input(
+            "Ollamaのモデル名",
+            "swallow-8b",
+            help="`ollama list` で表示される名前。4bit量子化(Q4_K_M)のSwallow 8B Instructを推奨。",
+        )
+        st.caption("⚠️ 事前にOllamaを起動しておいてください。16GBのMacでは他のアプリを閉じておくと安定します。")
     else:
         local_model_path = st.text_input(
             "Swallowモデルのパス",
@@ -354,7 +436,7 @@ if uploaded_file:
 
     if st.button("① 文字起こしを実行", type="primary"):
         with st.spinner("Whisperで文字起こし中..."):
-            st.session_state.result = transcribe(audio_path, medical_terms, model_size)
+            st.session_state.result = transcribe(audio_path, medical_terms, model_size, whisper_engine)
         st.session_state.pop("corrected", None)
         st.session_state.pop("speaker_turns", None)
 
@@ -398,7 +480,7 @@ if uploaded_file:
         backend_error = (
             "サイドバーにOpenAI APIキーを入力してください。"
             if llm_backend == "OpenAI API (GPT-4o)"
-            else "サイドバーにSwallowモデルのパスを入力してください。"
+            else "サイドバーにSwallowモデルのパス(Ollamaの場合はモデル名)を入力してください。"
         )
 
         st.divider()
