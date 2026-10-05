@@ -293,6 +293,25 @@ def check_vague_terms(text: str, backend: str, api_key: str, local_model_path: s
 LATERALITY_OPTIONS = ["不明", "右", "左", "両側", "なし(左右関係なし)"]
 
 
+def normalize_laterality(value) -> str:
+    """LLMの表記ゆれ(「なし」「左右関係なし」「両方」等)を選択肢に揃える。
+    ローカルLLMは指定どおりの文字列を返さないことがあり、そのまま「不明」に
+    落とすと、左右の概念が無い所見まで「不明」と表示されてしまうため。
+    """
+    v = str(value or "").strip().replace("（", "(").replace("）", ")")
+    if v in LATERALITY_OPTIONS:
+        return v
+    if "関係" in v or v in ("なし", "無し", "該当なし", "N/A", "-"):
+        return "なし(左右関係なし)"
+    if "両" in v:
+        return "両側"
+    if v.startswith("右"):
+        return "右"
+    if v.startswith("左"):
+        return "左"
+    return "不明"
+
+
 def extract_structured_findings(text: str, backend: str, api_key: str, local_model_path: str) -> list:
     """自由文のカルテ下書きから、診断に直結する重要所見を構造化して抽出する。
     側性(左右)や所見の有無を、自由文に埋め込まず個別項目として扱うことで、
@@ -578,9 +597,7 @@ if uploaded_file:
                     with cols[0]:
                         st.markdown(f"**{finding.get('item', '項目不明')}** {conf_icon}")
                     with cols[1]:
-                        laterality = finding.get("laterality") or "不明"
-                        if laterality not in LATERALITY_OPTIONS:
-                            laterality = "不明"
+                        laterality = normalize_laterality(finding.get("laterality"))
                         st.selectbox(
                             "側性",
                             LATERALITY_OPTIONS,
