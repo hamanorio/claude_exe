@@ -880,6 +880,23 @@ if uploaded_file:
                 if not p["context"]:
                     p["context"] = (seg["text"][max(0, start - 8) : start], seg["text"][end : end + 8])
 
+        with st.expander("音照合の診断情報(うまく候補が出ないとき用)"):
+            try:
+                import importlib.metadata as _md
+
+                kakasi_ver = _md.version("pykakasi")
+            except Exception:
+                kakasi_ver = "不明"
+            st.write(f"pykakasi: {kakasi_ver} / 用語数: {len(sound_terms)} / 索引に入った用語: {len(entries) if 'entries' in dir() else 0}")
+            st.write(f"セグメント数: {len(dict_segments)} / 候補(重複込み): {sum(len(m) for m in seg_matches)}")
+            if dict_segments:
+                sample = dict_segments[0]["text"][:40]
+                try:
+                    st.write(f"1番目のセグメント: {sample}")
+                    st.write("読み: " + " ".join(f"{o}({h})" for o, h in to_reading_tokens(sample)))
+                except ImportError:
+                    st.write("pykakasi が読み込めません")
+
         sound_key = abs(hash(result["text"])) % 10**8
         accepted_pairs = set()
         if not pairs:
