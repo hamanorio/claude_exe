@@ -1044,48 +1044,57 @@ if uploaded_file:
                             reviewed_text, llm_backend, api_key, local_model_path
                         )
                         st.session_state.findings_source = reviewed_text
+                        # 抽出し直したら、前回の入力・チェック状態を引き継がない
+                        st.session_state.findings_run = st.session_state.get("findings_run", 0) + 1
 
             if "findings" in st.session_state:
                 if not st.session_state.findings:
                     st.info("抽出できる重要所見が見つかりませんでした。")
                 all_confirmed = True
+                fr = st.session_state.get("findings_run", 0)
                 for i, finding in enumerate(st.session_state.findings):
                     conf_icon = "🟢" if finding.get("confidence") == "high" else "🔴"
-                    cols = st.columns([3, 2, 3, 1])
+                    cols = st.columns([3, 2, 3, 1, 1])
+                    excluded = st.session_state.get(f"finding_ex_{fr}_{i}", False)
                     with cols[0]:
                         item_name = finding.get("item", "項目不明")
-                        para = (
-                            " :orange[⚠会話に無い語]"
-                            if is_paraphrased(item_name, st.session_state.get("findings_source", ""))
-                            else ""
+                        st.text_input(
+                            "項目名",
+                            item_name,
+                            key=f"finding_item_{fr}_{i}",
+                            label_visibility="collapsed",
+                            disabled=excluded,
                         )
-                        st.markdown(
-                            f"**{item_name}** {conf_icon}{para}",
-                            help="⚠会話に無い語: LLMが会話中の言葉を別の用語に言い換えた項目名です。"
-                            "意味が合っているか確認してください。" if para else None,
-                        )
+                        flags = conf_icon
+                        if is_paraphrased(item_name, st.session_state.get("findings_source", "")):
+                            flags += " :orange[⚠会話に無い語(LLMの言い換え。意味が合うか確認)]"
+                        st.caption(flags)
                     with cols[1]:
                         laterality = normalize_laterality(finding.get("laterality"))
                         st.selectbox(
                             "側性",
                             LATERALITY_OPTIONS,
                             index=LATERALITY_OPTIONS.index(laterality),
-                            key=f"finding_lat_{i}",
+                            key=f"finding_lat_{fr}_{i}",
                             label_visibility="collapsed",
+                            disabled=excluded,
                         )
                     with cols[2]:
                         st.text_input(
                             "内容",
                             finding.get("value", "不明"),
-                            key=f"finding_val_{i}",
+                            key=f"finding_val_{fr}_{i}",
                             label_visibility="collapsed",
+                            disabled=excluded,
                         )
                     with cols[3]:
-                        confirmed = st.checkbox("確認済", key=f"finding_ok_{i}")
-                        all_confirmed = all_confirmed and confirmed
+                        confirmed = st.checkbox("確認済", key=f"finding_ok_{fr}_{i}", disabled=excluded)
+                    with cols[4]:
+                        st.checkbox("除外", key=f"finding_ex_{fr}_{i}", help="誤って抽出された項目をカルテに含めない")
+                    all_confirmed = all_confirmed and (confirmed or excluded)
 
                 if st.session_state.findings and not all_confirmed:
-                    st.caption("⚠️ すべての項目の「確認済」にチェックが入るまで、下の確定ボタンは有効になりません。")
+                    st.caption("⚠️ すべての項目に「確認済」か「除外」のチェックが入るまで、下の確定ボタンは有効になりません。")
 
             st.divider()
             st.subheader("⑥ 最終確認・編集")
@@ -1099,7 +1108,9 @@ if uploaded_file:
                 "findings" not in st.session_state
                 or not st.session_state.findings
                 or all(
-                    st.session_state.get(f"finding_ok_{i}", False)
+                    st.session_state.get(f"finding_ok_{fr_}_{i}", False)
+                    or st.session_state.get(f"finding_ex_{fr_}_{i}", False)
+                    for fr_ in [st.session_state.get("findings_run", 0)]
                     for i in range(len(st.session_state.findings))
                 )
             )
