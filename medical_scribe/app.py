@@ -280,12 +280,42 @@ def correct_with_llm(
 ただし、聞き取れなかった可能性がある情報を、典型的な症例パターンから推測して新たに追加することは絶対にしないでください。
 意味が不明瞭、または欠落している可能性がある箇所は、無理に埋めず、そのまま残してください。
 
+出力は修正後の会話テキストだけにしてください。修正点の一覧や説明は書かないでください。
+
 【音声認識結果】
 {raw_text}
 
 【修正後のテキスト】
 """
-    return run_llm(prompt, backend, api_key, local_model_path)
+    return strip_commentary(run_llm(prompt, backend, api_key, local_model_path))
+
+
+def strip_commentary(text: str) -> str:
+    """ローカルLLMは指示しても「修正点:」のような説明を末尾に付けることがある。
+    説明はカルテ本文に混ざると危険(実際には行っていない修正を書くこともある)なので切り捨てる。
+    """
+    m = re.search(r"[*#]*\s*(修正点|修正内容|変更点|修正箇所|補足|注記|説明)\s*[*]*\s*[:：]", text)
+    return text[: m.start()].strip() if m else text.strip()
+
+
+def parse_correction_dict(raw: str) -> list:
+    """「誤→正」を1行に1つ書いた辞書を読み取る。"""
+    rules = []
+    for line in raw.splitlines():
+        parts = re.split(r"\s*(?:→|->|=>)\s*", line.strip(), maxsplit=1)
+        if len(parts) == 2 and parts[0] and parts[1]:
+            rules.append((parts[0], parts[1]))
+    return rules
+
+
+def apply_correction_dict(text: str, rules: list, applied: dict) -> str:
+    """医師が登録した誤変換を機械的に置き換える。LLMと違って、登録した以外の変更は一切しない。"""
+    for wrong, right in rules:
+        n = text.count(wrong)
+        if n:
+            text = text.replace(wrong, right)
+            applied[f"{wrong}→{right}"] = applied.get(f"{wrong}→{right}", 0) + n
+    return text
 
 
 @st.cache_resource
@@ -479,9 +509,14 @@ def highlight_diff_html(raw_text: str, corrected_text: str) -> str:
             )
         elif tag == "replace":
             html_parts.append(
+                f"<del style='color:#999'>{raw_text[_i1:_i2]}</del>"
                 f"<span style='background-color:#fff3b0' title='音声認識結果が修正された箇所'>{seg}</span>"
             )
-        # tag == "delete" は補正後テキストには現れないので無視
+        elif tag == "delete":
+            # LLMが消した箇所。情報の欠落(例:「著明に」が消えて程度が分からなくなる)に気づけるよう表示する
+            html_parts.append(
+                f"<del style='background-color:#e0e0ff' title='LLMが削除した箇所'>{raw_text[_i1:_i2]}</del>"
+            )
     return "".join(html_parts)
 
 
@@ -503,6 +538,13 @@ with st.sidebar:
         "医学用語ヒント(initial_prompt用)",
         "呂律、構音障害、顔面神経麻痺、心房細動、不整脈、脂質異常症、浸潤影、湿性ラ音",
         height=100,
+    )
+    correction_dict_raw = st.text_area(
+        "誤変換辞書(誤→正 を1行に1つ)",
+        "有利T4→遊離T4\n有利T3→遊離T3",
+        height=100,
+        help="よく起きる音声認識の誤りを登録しておくと、②の前に機械的に置き換えます。"
+        "LLMより確実で、登録した以外の変更はしません。",
     )
     st.divider()
     llm_backend = st.radio(
@@ -586,7 +628,12 @@ if uploaded_file:
                     st.session_state.play_start = int(seg["start"])
                     st.rerun()
 
-        raw_text = result["text"]
+        correction_rules = parse_correction_dict(correction_dict_raw)
+        dict_applied = {}
+        dict_segments = [
+            {**seg, "text": apply_correction_dict(seg["text"], correction_rules, dict_applied)} for seg in segments
+        ]
+        raw_text = apply_correction_dict(result["text"], correction_rules, {})
         backend_ready = bool(api_key) if llm_backend == "OpenAI API (GPT-4o)" else bool(local_model_path)
         backend_error = (
             "サイドバーにOpenAI APIキーを入力してください。"
@@ -607,8 +654,14 @@ if uploaded_file:
             else:
                 with st.spinner("話者を推定中..."):
                     st.session_state.speaker_labeled_text_box = infer_speakers_from_text(
-                        result["segments"], llm_backend, api_key, local_model_path
+                        dict_segments, llm_backend, api_key, local_model_path
                     )
+
+        if dict_applied:
+            st.caption(
+                "📖 誤変換辞書で置き換えた箇所: "
+                + "、".join(f"{k}({n}箇所)" for k, n in dict_applied.items())
+            )
 
         if "speaker_labeled_text_box" in st.session_state:
             st.text_area(
@@ -633,7 +686,7 @@ if uploaded_file:
 
         if "corrected" in st.session_state:
             st.markdown(
-                "**差分ハイライト** "
+                "**差分ハイライト** (~~取り消し線~~=LLMが削除・置換した元の文字) "
                 "(🟨 黄色=既存箇所の修正　🟥 赤=生の音声認識結果には無かった、LLMが新たに補った可能性のある箇所)"
             )
             html = highlight_diff_html(text_for_correction, st.session_state.corrected)
