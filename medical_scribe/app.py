@@ -387,10 +387,12 @@ def check_vague_terms(text: str, backend: str, api_key: str, local_model_path: s
 
 1. 意味の通らない語句: 診察の会話として文脈上ありえない単語や、医学用語が崩れたように見える語句
    (例:「心房最同」「左の配に影」のように、一般語の組み合わせとしても医学用語としても不自然なもの)
-2. 曖昧な部位・症状の表現: 身体のどこか、どんな症状かが記録として特定できないもの
-   (例:「奥」「あのへん」「変な感じ」のように、部位や性状が分からないもの)
+2. 医師の発言の中の曖昧な部位表現: 診察所見として、身体のどこかが特定できないもの
+   (例:医師が「奥のほうに」「あのへんに」と言っていて、部位が分からないもの)
 
-会話なので、患者の話し言葉が口語的なのは自然です。言い回しが口語的というだけでは指摘しないでください。
+患者が自分の症状を自分の言葉で表した表現(「ズキズキする」「キラキラした光」「重い感じ」など)は、
+症状の性質を伝える大切な情報なので、曖昧として指摘しないでください。
+会話なので、話し言葉が口語的なのは自然です。言い回しが口語的というだけでは指摘しないでください。
 また、医学的に正しく使われている語(例:「発作」「前兆」「圧痛」)を別の語に言い換える提案はしないでください。
 
 文を1つずつ確認し、見落としが無いようにしてください。
@@ -461,6 +463,16 @@ def apply_laterality_rules(findings: list) -> list:
         elif any(k in item for k in LATERAL_KEYWORDS) and normalize_laterality(f.get("laterality")) == "なし(左右関係なし)":
             f["laterality"] = "不明"
     return findings
+
+
+def is_paraphrased(item: str, text: str) -> bool:
+    """項目名が会話中に見当たらない(LLMが別の用語に言い換えた)かを判定する。
+    項目名の漢字・カタカナ2文字の並びが1つも本文に無ければ「言い換え」とみなす。
+    例: 患者が「キラキラした光」と言っただけなのに項目名が「光視症」になっている場合。
+    """
+    chunks = re.findall(r"[\u4e00-\u9fff\u30a0-\u30ffA-Za-z0-9]+", item)
+    bigrams = [c[i : i + 2] for c in chunks for i in range(max(1, len(c) - 1))]
+    return bool(bigrams) and not any(b in text for b in bigrams)
 
 
 def extract_structured_findings(text: str, backend: str, api_key: str, local_model_path: str) -> list:
@@ -1031,6 +1043,7 @@ if uploaded_file:
                         st.session_state.findings = extract_structured_findings(
                             reviewed_text, llm_backend, api_key, local_model_path
                         )
+                        st.session_state.findings_source = reviewed_text
 
             if "findings" in st.session_state:
                 if not st.session_state.findings:
@@ -1040,7 +1053,17 @@ if uploaded_file:
                     conf_icon = "🟢" if finding.get("confidence") == "high" else "🔴"
                     cols = st.columns([3, 2, 3, 1])
                     with cols[0]:
-                        st.markdown(f"**{finding.get('item', '項目不明')}** {conf_icon}")
+                        item_name = finding.get("item", "項目不明")
+                        para = (
+                            " :orange[⚠会話に無い語]"
+                            if is_paraphrased(item_name, st.session_state.get("findings_source", ""))
+                            else ""
+                        )
+                        st.markdown(
+                            f"**{item_name}** {conf_icon}{para}",
+                            help="⚠会話に無い語: LLMが会話中の言葉を別の用語に言い換えた項目名です。"
+                            "意味が合っているか確認してください。" if para else None,
+                        )
                     with cols[1]:
                         laterality = normalize_laterality(finding.get("laterality"))
                         st.selectbox(
