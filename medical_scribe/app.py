@@ -1058,17 +1058,17 @@ if uploaded_file:
                     excluded = st.session_state.get(f"finding_ex_{fr}_{i}", False)
                     with cols[0]:
                         item_name = finding.get("item", "項目不明")
+                        # 印は入力欄の「上」に出す(下に出すと次の項目の印に見えてしまうため)
+                        flags = f"項目名 {conf_icon}"
+                        if is_paraphrased(item_name, st.session_state.get("findings_source", "")):
+                            flags += " :orange[⚠会話に無い語]"
                         st.text_input(
-                            "項目名",
+                            flags,
                             item_name,
                             key=f"finding_item_{fr}_{i}",
-                            label_visibility="collapsed",
                             disabled=excluded,
+                            help="⚠会話に無い語: LLMが会話中の言葉を別の用語に言い換えた項目名です。意味が合うか確認してください。",
                         )
-                        flags = conf_icon
-                        if is_paraphrased(item_name, st.session_state.get("findings_source", "")):
-                            flags += " :orange[⚠会話に無い語(LLMの言い換え。意味が合うか確認)]"
-                        st.caption(flags)
                     with cols[1]:
                         laterality = normalize_laterality(finding.get("laterality"))
                         st.selectbox(
@@ -1076,7 +1076,6 @@ if uploaded_file:
                             LATERALITY_OPTIONS,
                             index=LATERALITY_OPTIONS.index(laterality),
                             key=f"finding_lat_{fr}_{i}",
-                            label_visibility="collapsed",
                             disabled=excluded,
                         )
                     with cols[2]:
@@ -1084,7 +1083,6 @@ if uploaded_file:
                             "内容",
                             finding.get("value", "不明"),
                             key=f"finding_val_{fr}_{i}",
-                            label_visibility="collapsed",
                             disabled=excluded,
                         )
                     with cols[3]:
