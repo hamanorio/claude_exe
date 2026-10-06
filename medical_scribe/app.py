@@ -186,28 +186,76 @@ def transcribe(audio_path: str, medical_terms: str, model_size: str, engine: str
     return result
 
 
-def infer_speakers_from_text(raw_text: str, backend: str, api_key: str, local_model_path: str) -> str:
+def split_utterances(segments) -> list:
+    """Whisperのセグメント(無音で区切られた単位)を、さらに句点・疑問符で文に分ける。
+    話者の交代は文の途中では起きにくいので、この単位ごとに話者を割り当てる。
+    """
+    units = []
+    for seg in segments:
+        for part in re.split(r"(?<=[。？?！!])", seg["text"]):
+            part = part.strip()
+            if part:
+                units.append(part)
+    return units
+
+
+def infer_speakers_from_text(segments, backend: str, api_key: str, local_model_path: str) -> str:
     """音声レベルの話者分離を使わず、発言内容の文脈だけから医師/患者を推測する。
     質問・所見の提示(医師)と症状の訴え(患者)というパターンの違いを手がかりにする。
+
+    LLMには番号付きの文を渡し、番号ごとの話者だけを答えさせる。本文はプログラム側で
+    組み立て直すので、LLMが文の区切りを勝手に変えたり、本文を書き換えたりできない。
     """
-    prompt = f"""以下は、医師と患者の診察会話の文字起こしです。話者のラベルはついていません。
-文脈(質問している/答えている、症状を訴えている/所見を述べている等)から、各発言が「医師」か「患者」のどちらの発言かを推測し、
-発言ごとに分けて以下の形式で出力してください。
-テキストの内容自体は変更せず、話者の割り当てと改行のみ行ってください。
+    units = split_utterances(segments)
+    numbered = "\n".join(f"{i + 1}. {u}" for i, u in enumerate(units))
+    prompt = f"""以下は、医師と患者の診察会話の文字起こしを、文ごとに番号を付けて並べたものです。
+各文が「医師」と「患者」のどちらの発言かを、前後の流れから判断してください。
+
+判断の手がかり:
+- 医師: 質問する、診察・検査の説明をする、所見や検査結果を述べる
+- 患者: 質問に答える、自分の症状・生活・気持ちを話す
+- 質問の直後の文は、多くの場合その質問への答え(=もう一方の話者)です
+- 「〜なんですけど」「〜があります」のように自分の体のことを話している文は患者です
+
+出力は1行に1つ、「番号: 医師」または「番号: 患者」の形式だけで、全ての番号について答えてください。本文は書かないでください。
 
 【文字起こし】
-{raw_text}
+{numbered}
 
-【話者推定付きの会話】
+【回答】
 """
-    return run_llm(prompt, backend, api_key, local_model_path)
+    output = run_llm(prompt, backend, api_key, local_model_path)
+    labels = {}
+    for m in re.finditer(r"(\d+)\s*[.:：、)]\s*(医師|患者)", output):
+        labels[int(m.group(1))] = m.group(2)
+
+    lines = []
+    for i, unit in enumerate(units):
+        speaker = labels.get(i + 1, "不明")
+        if lines and lines[-1][0] == speaker:
+            lines[-1][1] += unit
+        else:
+            lines.append([speaker, unit])
+    return "\n".join(f"{sp}：{text}" for sp, text in lines)
 
 
-def correct_with_llm(raw_text: str, backend: str, api_key: str, local_model_path: str) -> str:
+def correct_with_llm(
+    raw_text: str, backend: str, api_key: str, local_model_path: str, medical_terms: str = ""
+) -> str:
     prompt = f"""以下は、医師と患者の診察会話を音声認識(Whisper)で文字起こししたテキストです。
 話者ラベル(医師:/患者:)が付いている場合は、そのラベルと発言の区切りを維持してください。
 音声認識特有の誤変換(医学用語が似た音の別の言葉に変換されている等)が含まれている可能性があります。
 文脈から医学的に正しいと考えられる形に修正してください。
+
+誤変換の典型例(同じ音・似た音の別の漢字や単語になっている):
+- 「方針経過」→「経過観察」のように語順や漢字が崩れたもの
+- 「関節」と「間接」、「意志」と「医師」のような同音異義語の取り違え
+- 医学用語が、意味の通らない一般語の組み合わせになっているもの
+  (例:「心房最同」→「心房細動」、「指示異常賞」→「脂質異常症」)
+一文ずつ「医学的な会話として意味が通るか」を確認し、通らない箇所は音の近い医学用語を検討してください。
+
+この会話には、次のような用語が出てくる可能性があります(医師が事前に指定したもの):
+{medical_terms}
 ただし、聞き取れなかった可能性がある情報を、典型的な症例パターンから推測して新たに追加することは絶対にしないでください。
 意味が不明瞭、または欠落している可能性がある箇所は、無理に埋めず、そのまま残してください。
 
@@ -276,9 +324,14 @@ def confidence_badge(avg_logprob: float) -> str:
 
 def check_vague_terms(text: str, backend: str, api_key: str, local_model_path: str) -> str:
     prompt = f"""以下はカルテ下書きです。
-身体の部位や症状の表現の中で、医学的な記録としては不自然に曖昧・口語的な表現
-(例:「奥」「なんか」「あのへん」「変な感じ」等、標準的な解剖学的・臨床的用語になっていないもの)
-が使われている箇所があれば、音声認識の誤りの可能性があるとして指摘してください。
+次の2種類の箇所を探して、音声認識の誤りの可能性があるとして指摘してください。
+
+1. 意味の通らない語句: 診察の会話として文脈上ありえない単語や、医学用語が崩れたように見える語句
+   (例:「心房最同」「左の配に影」のように、一般語の組み合わせとしても医学用語としても不自然なもの)
+2. 曖昧・口語的な表現: 身体の部位や症状の表現の中で、医学的な記録としては不自然に曖昧なもの
+   (例:「奥」「なんか」「あのへん」「変な感じ」等、標準的な解剖学的・臨床的用語になっていないもの)
+
+文を1つずつ確認し、見落としが無いようにしてください。
 断定せず、「要確認」として該当箇所を引用した上で挙げてください。
 該当箇所が無い場合は「特に気になる曖昧な表現はありません」とだけ答えてください。
 
@@ -310,6 +363,23 @@ def normalize_laterality(value) -> str:
     if v.startswith("左"):
         return "左"
     return "不明"
+
+
+# 左右の概念が無いことが明らかな所見。ローカルLLMは指示しても「不明」を返すことが
+# あるため、項目名にこれらの語を含む場合はプログラム側で「なし」に揃える。
+NO_LATERALITY_KEYWORDS = [
+    "動悸", "体重", "発汗", "汗", "暑がり", "寒がり", "食欲", "発熱", "体温", "倦怠",
+    "イライラ", "不眠", "月経", "脈", "血圧", "呼吸数", "SpO2", "TSH", "FT3", "FT4",
+    "検査", "採血", "血液",
+]
+
+
+def apply_laterality_rules(findings: list) -> list:
+    for f in findings:
+        item = str(f.get("item", ""))
+        if any(k in item for k in NO_LATERALITY_KEYWORDS):
+            f["laterality"] = "なし(左右関係なし)"
+    return findings
 
 
 def extract_structured_findings(text: str, backend: str, api_key: str, local_model_path: str) -> list:
@@ -372,7 +442,7 @@ confidence フィールドには、その抽出の確信度を "high" または 
             data = json.loads(response.choices[0].message.content)
         except (json.JSONDecodeError, AttributeError):
             data = {}
-    return data.get("findings", [])
+    return apply_laterality_rules(data.get("findings", []))
 
 
 def highlight_diff_html(raw_text: str, corrected_text: str) -> str:
@@ -458,6 +528,7 @@ if uploaded_file:
             st.session_state.result = transcribe(audio_path, medical_terms, model_size, whisper_engine)
         st.session_state.pop("corrected", None)
         st.session_state.pop("speaker_turns", None)
+        st.session_state.pop("speaker_labeled_text_box", None)
 
         if enable_diarization:
             if not hf_token:
@@ -514,19 +585,18 @@ if uploaded_file:
                 st.error(backend_error)
             else:
                 with st.spinner("話者を推定中..."):
-                    st.session_state.speaker_labeled_text = infer_speakers_from_text(
-                        raw_text, llm_backend, api_key, local_model_path
+                    st.session_state.speaker_labeled_text_box = infer_speakers_from_text(
+                        result["segments"], llm_backend, api_key, local_model_path
                     )
 
-        if "speaker_labeled_text" in st.session_state:
+        if "speaker_labeled_text_box" in st.session_state:
             st.text_area(
-                "話者推定付きの会話(必要なら手動で修正してください)",
-                st.session_state.speaker_labeled_text,
+                "話者推定付きの会話(必要なら手動で修正してください。修正内容は③以降に使われます)",
                 height=200,
                 key="speaker_labeled_text_box",
             )
 
-        text_for_correction = st.session_state.get("speaker_labeled_text", raw_text)
+        text_for_correction = st.session_state.get("speaker_labeled_text_box", raw_text)
 
         st.divider()
         st.subheader("③ LLMによる文脈補正")
@@ -537,7 +607,7 @@ if uploaded_file:
             else:
                 with st.spinner("補正中..."):
                     st.session_state.corrected = correct_with_llm(
-                        text_for_correction, llm_backend, api_key, local_model_path
+                        text_for_correction, llm_backend, api_key, local_model_path, medical_terms
                     )
 
         if "corrected" in st.session_state:
