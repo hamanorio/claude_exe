@@ -391,7 +391,16 @@ def check_vague_terms(text: str, backend: str, api_key: str, local_model_path: s
 
 【要確認フラグ】
 """
-    return run_llm(prompt, backend, api_key, local_model_path)
+    return drop_contradicting_none(run_llm(prompt, backend, api_key, local_model_path))
+
+
+NO_FLAG_PHRASE = "特に気になる曖昧な表現はありません"
+
+
+def drop_contradicting_none(text: str) -> str:
+    """指摘を挙げた後に「特に気になる表現はありません」と付け足す矛盾した出力を整える。"""
+    rest = text.replace(NO_FLAG_PHRASE + "。", "").replace(NO_FLAG_PHRASE, "").strip()
+    return rest if rest else NO_FLAG_PHRASE + "。"
 
 
 LATERALITY_OPTIONS = ["不明", "右", "左", "両側", "なし(左右関係なし)"]
@@ -425,11 +434,20 @@ NO_LATERALITY_KEYWORDS = [
 ]
 
 
+# 左右がありうる部位・所見。LLMが「なし(左右関係なし)」と答えても、医師が選べるよう「不明」に戻す。
+LATERAL_KEYWORDS = [
+    "震え", "振戦", "麻痺", "しびれ", "痺れ", "痛", "腫", "浮腫", "眼", "目", "耳",
+    "手", "足", "腕", "脚", "肺", "乳房", "甲状腺", "関節",
+]
+
+
 def apply_laterality_rules(findings: list) -> list:
     for f in findings:
         item = str(f.get("item", ""))
         if any(k in item for k in NO_LATERALITY_KEYWORDS):
             f["laterality"] = "なし(左右関係なし)"
+        elif any(k in item for k in LATERAL_KEYWORDS) and normalize_laterality(f.get("laterality")) == "なし(左右関係なし)":
+            f["laterality"] = "不明"
     return findings
 
 
@@ -440,6 +458,8 @@ def extract_structured_findings(text: str, backend: str, api_key: str, local_mod
     医師が1項目ずつ確認する運用を可能にする。
     """
     prompt = f"""以下はカルテ下書きです。診断・治療方針に直結する重要な所見を構造化して抽出してください。
+患者が訴えた症状・変化(食欲・睡眠・排便・気分など)と、医師が述べた身体所見(皮膚・脈・頸部など)と検査結果は、
+軽そうに見えても省略せず、1つずつ別の項目として挙げてください。
 
 重要: 「不明」は、その情報が本当にテキスト中に存在しない場合にのみ使ってください。
 テキストに明確に書かれている内容は、省略したり「不明」にせず、そのまま正確に抽出してください。
