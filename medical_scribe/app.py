@@ -998,6 +998,9 @@ if uploaded_file:
                 old_md = f":red[~~{md_escape(old)}~~]" if old.strip() else ":gray[(なし)]"
                 new_md = f":green[**{md_escape(new)}**]" if new.strip() else ":red[**(削除)**]"
                 label = f"…{md_escape(before)} {old_md} → {new_md} {md_escape(after)}…"
+                if not new.strip():
+                    # 削除は情報の欠落につながる(例:「著明に」が消えて程度が分からなくなる)ため目立たせる
+                    label = ":red[**⚠削除(情報が消えます)**] " + label
                 accepted[i] = st.checkbox(label, key=f"chg_{run}_{i}")
 
             if not change_ids:
