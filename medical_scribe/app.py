@@ -537,7 +537,8 @@ def highlight_diff_html(raw_text: str, corrected_text: str) -> str:
             html_parts.append(
                 f"<del style='background-color:#e0e0ff' title='LLMが削除した箇所'>{raw_text[_i1:_i2]}</del>"
             )
-    return "".join(html_parts)
+    # 改行を表示に反映し、話者ごとの行が1段落につながって読みにくくならないようにする
+    return "".join(html_parts).replace("\n", "<br>")
 
 
 PUNCTUATION = set("。、，．,.!?！？ 　\n")
@@ -801,8 +802,8 @@ if uploaded_file:
                 _, old, new = parts[i]
                 before = "".join(p[1] for p in parts[:i])[-12:]
                 after = "".join(p[1] for p in parts[i + 1 :])[:12]
-                old_md = f"~~{md_escape(old)}~~" if old.strip() else "(なし)"
-                new_md = f"**{md_escape(new)}**" if new.strip() else "**(削除)**"
+                old_md = f":red[~~{md_escape(old)}~~]" if old.strip() else ":gray[(なし)]"
+                new_md = f":green[**{md_escape(new)}**]" if new.strip() else ":red[**(削除)**]"
                 label = f"…{md_escape(before)} {old_md} → {new_md} {md_escape(after)}…"
                 accepted[i] = st.checkbox(label, key=f"chg_{run}_{i}")
 
