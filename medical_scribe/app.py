@@ -65,6 +65,7 @@ from openai import OpenAI
 # (Mac + Ollama + mlx-whisper の構成ではインストール不要にするため)
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
+IS_APPLE_SILICON = platform.system() == "Darwin" and platform.machine() == "arm64"
 
 st.set_page_config(page_title="診察音声→カルテ下書き プロトタイプ", layout="wide")
 
@@ -704,7 +705,7 @@ with st.sidebar:
         "Whisperエンジン",
         ["openai-whisper", "mlx-whisper"],
         # Apple Silicon の Mac では mlx-whisper を初期選択にする(再起動のたびに選び直さなくて済むように)
-        index=1 if platform.system() == "Darwin" and platform.machine() == "arm64" else 0,
+        index=1 if IS_APPLE_SILICON else 0,
         help="Mac(Apple Silicon)では mlx-whisper の方が大幅に速く動きます。",
     )
     whisper_sizes = ["medium", "large-v3", "large-v3-turbo"] if whisper_engine == "mlx-whisper" else ["medium", "large-v3"]
@@ -744,6 +745,9 @@ with st.sidebar:
     llm_backend = st.radio(
         "②③④⑤で使うLLM",
         ["OpenAI API (GPT-4o)", "ローカル(Swallow)", "ローカル(Ollama・Mac向け)"],
+        # 患者データが外部に送られないよう、初期選択は必ずローカルにする。
+        # Apple Silicon の Mac では Ollama、それ以外(Colab等)では transformers の Swallow。
+        index=2 if IS_APPLE_SILICON else 1,
         help="実在する患者データを扱う場合は越境移転の問題を避けるため、ローカルのいずれかを推奨します。"
         "Macでは「ローカル(Ollama・Mac向け)」を使ってください。",
     )
