@@ -586,6 +586,15 @@ with st.sidebar:
         "呂律、構音障害、顔面神経麻痺、心房細動、不整脈、脂質異常症、浸潤影、湿性ラ音",
         height=100,
     )
+    # 「誤→正」の行がヒント欄に入っていると、誤った語(「腸鳴に低下」等)がWhisperへのヒントになり、
+    # かえってその誤変換を誘発しうる。ヒントからは除外し、辞書欄に移すよう促す。
+    misplaced = [line for line in medical_terms.splitlines() if re.search(r"→|->|=>", line)]
+    if misplaced:
+        st.warning(
+            "医学用語ヒントに「誤→正」の行があります。これらはヒントとしては使わずに除外しました。"
+            "下の「誤変換辞書」に移してください: " + " / ".join(misplaced)
+        )
+        medical_terms = "\n".join(line for line in medical_terms.splitlines() if line not in misplaced)
     correction_dict_raw = st.text_area(
         "誤変換辞書(誤→正 を1行に1つ)",
         "有利T4→遊離T4\n有利T3→遊離T3",
