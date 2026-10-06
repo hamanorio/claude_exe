@@ -53,6 +53,7 @@
 
 import difflib
 import json
+import platform
 import re
 import tempfile
 import urllib.request
@@ -160,6 +161,12 @@ MLX_WHISPER_REPOS = {
 def load_whisper_model(model_size: str):
     import whisper
 
+    if not hasattr(whisper, "load_model"):
+        # 同名の別パッケージ(pip の "whisper")が入っていると、この状態になる
+        raise RuntimeError(
+            "openai-whisper が見つかりません。Macではサイドバーで「mlx-whisper」を選んでください。"
+            "openai-whisper を使う場合は `pip uninstall whisper && pip install openai-whisper` を実行してください。"
+        )
     return whisper.load_model(model_size)
 
 
@@ -696,6 +703,8 @@ with st.sidebar:
     whisper_engine = st.radio(
         "Whisperエンジン",
         ["openai-whisper", "mlx-whisper"],
+        # Apple Silicon の Mac では mlx-whisper を初期選択にする(再起動のたびに選び直さなくて済むように)
+        index=1 if platform.system() == "Darwin" and platform.machine() == "arm64" else 0,
         help="Mac(Apple Silicon)では mlx-whisper の方が大幅に速く動きます。",
     )
     whisper_sizes = ["medium", "large-v3", "large-v3-turbo"] if whisper_engine == "mlx-whisper" else ["medium", "large-v3"]
