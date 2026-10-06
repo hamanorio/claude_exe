@@ -520,6 +520,53 @@ def highlight_diff_html(raw_text: str, corrected_text: str) -> str:
     return "".join(html_parts)
 
 
+PUNCTUATION = set("。、，．,.!?！？ 　\n")
+
+
+def group_changes(old_text: str, new_text: str, max_gap: int = 1) -> list:
+    """③の前後のテキストを、採用・却下を選べる「修正」の単位に分ける。
+    文字単位の差分は細切れになるため(例:「美満腺の主題」→「びまん性の腫大」が
+    「美満腺」「主題」の2つに割れる)、間の一致部分が max_gap 文字以下(既定は1文字。「の」等)なら1つの修正にまとめる。
+    戻り値: ("equal", 文字列) または ("change", 元の文字列, 修正後の文字列) のリスト
+    """
+    ops = difflib.SequenceMatcher(None, old_text, new_text, autojunk=False).get_opcodes()
+    parts = []
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "equal":
+            parts.append(["equal", old_text[i1:i2]])
+        elif parts and parts[-1][0] == "change":
+            parts[-1][1] += old_text[i1:i2]
+            parts[-1][2] += new_text[j1:j2]
+        elif len(parts) >= 2 and parts[-2][0] == "change" and len(parts[-1][1]) <= max_gap:
+            gap = parts.pop()[1]
+            parts[-1][1] += gap + old_text[i1:i2]
+            parts[-1][2] += gap + new_text[j1:j2]
+        else:
+            parts.append(["change", old_text[i1:i2], new_text[j1:j2]])
+    return [tuple(p) for p in parts]
+
+
+def is_punctuation_only(old: str, new: str) -> bool:
+    strip = lambda t: "".join(c for c in t if c not in PUNCTUATION)
+    return strip(old) == strip(new)
+
+
+def build_reviewed_text(parts: list, accepted: dict) -> str:
+    """採用された修正だけを反映したテキストを組み立てる。採用されていない修正は元のまま。"""
+    out = []
+    for idx, part in enumerate(parts):
+        if part[0] == "equal":
+            out.append(part[1])
+        else:
+            out.append(part[2] if accepted.get(idx, False) else part[1])
+    return "".join(out)
+
+
+def md_escape(text: str) -> str:
+    text = text.replace("\n", " / ")
+    return re.sub(r"([*_~`\\\[\]])", r"\\\1", text)
+
+
 # ---------------- UI ----------------
 
 st.title("🩺 診察音声 → カルテ下書き プロトタイプ")
@@ -683,17 +730,60 @@ if uploaded_file:
                     st.session_state.corrected = correct_with_llm(
                         text_for_correction, llm_backend, api_key, local_model_path, medical_terms
                     )
+                    st.session_state.correction_base = text_for_correction
+                    # 新しい補正結果では採用・却下のチェックをやり直す
+                    st.session_state.correction_run = st.session_state.get("correction_run", 0) + 1
 
         if "corrected" in st.session_state:
             st.markdown(
                 "**差分ハイライト** (~~取り消し線~~=LLMが削除・置換した元の文字) "
                 "(🟨 黄色=既存箇所の修正　🟥 赤=生の音声認識結果には無かった、LLMが新たに補った可能性のある箇所)"
             )
-            html = highlight_diff_html(text_for_correction, st.session_state.corrected)
+            html = highlight_diff_html(
+                st.session_state.get("correction_base", text_for_correction), st.session_state.corrected
+            )
             st.markdown(
                 f"<div style='border:1px solid #ddd; padding:12px; border-radius:6px; line-height:1.8;'>{html}</div>",
                 unsafe_allow_html=True,
             )
+
+            st.markdown("**修正の採用・却下**")
+            st.caption(
+                "LLMの修正は、チェックを入れたものだけが反映されます(初期状態はすべて却下=元のまま)。"
+                "句読点だけの変更は自動で採用しています。"
+            )
+            base_text = st.session_state.get("correction_base", text_for_correction)
+            parts = group_changes(base_text, st.session_state.corrected)
+            run = st.session_state.get("correction_run", 0)
+            change_ids = [i for i, p in enumerate(parts) if p[0] == "change" and not is_punctuation_only(p[1], p[2])]
+            punct_ids = [i for i, p in enumerate(parts) if p[0] == "change" and is_punctuation_only(p[1], p[2])]
+
+            if change_ids:
+                bcols = st.columns([1, 1, 4])
+                if bcols[0].button("すべて採用"):
+                    for i in change_ids:
+                        st.session_state[f"chg_{run}_{i}"] = True
+                if bcols[1].button("すべて却下"):
+                    for i in change_ids:
+                        st.session_state[f"chg_{run}_{i}"] = False
+
+            accepted = {i: True for i in punct_ids}
+            for i in change_ids:
+                _, old, new = parts[i]
+                before = "".join(p[1] for p in parts[:i])[-12:]
+                after = "".join(p[1] for p in parts[i + 1 :])[:12]
+                old_md = f"~~{md_escape(old)}~~" if old.strip() else "(なし)"
+                new_md = f"**{md_escape(new)}**" if new.strip() else "**(削除)**"
+                label = f"…{md_escape(before)} {old_md} → {new_md} {md_escape(after)}…"
+                accepted[i] = st.checkbox(label, key=f"chg_{run}_{i}")
+
+            if not change_ids:
+                st.info("句読点以外の修正はありませんでした。")
+            else:
+                n_ok = sum(1 for i in change_ids if accepted[i])
+                st.caption(f"採用 {n_ok} 件 / 全 {len(change_ids)} 件(句読点のみの変更 {len(punct_ids)} 件は自動採用)")
+
+            reviewed_text = build_reviewed_text(parts, accepted)
 
             st.divider()
             st.subheader("④ 不自然な表現のチェック")
@@ -708,7 +798,7 @@ if uploaded_file:
                 else:
                     with st.spinner("チェック中..."):
                         st.session_state.vague_flags = check_vague_terms(
-                            st.session_state.corrected, llm_backend, api_key, local_model_path
+                            reviewed_text, llm_backend, api_key, local_model_path
                         )
 
             if "vague_flags" in st.session_state:
@@ -728,7 +818,7 @@ if uploaded_file:
                 else:
                     with st.spinner("抽出中..."):
                         st.session_state.findings = extract_structured_findings(
-                            st.session_state.corrected, llm_backend, api_key, local_model_path
+                            reviewed_text, llm_backend, api_key, local_model_path
                         )
 
             if "findings" in st.session_state:
@@ -766,8 +856,8 @@ if uploaded_file:
             st.divider()
             st.subheader("⑥ 最終確認・編集")
             final_text = st.text_area(
-                "補正後テキスト(確定前に必ず目視確認・編集してください)",
-                st.session_state.corrected,
+                "補正後テキスト(採用した修正のみ反映。確定前に必ず目視確認・編集してください)",
+                reviewed_text,
                 height=200,
             )
 
