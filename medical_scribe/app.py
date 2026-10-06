@@ -45,7 +45,7 @@
          ollama pull hf.co/<ユーザー名>/<GGUFリポジトリ名>:Q4_K_M
        またはダウンロードしたGGUFから:
          echo "FROM ./ファイル名.gguf" > Modelfile && ollama create swallow-8b -f Modelfile
-    3. pip install streamlit mlx-whisper openai
+    3. pip install streamlit mlx-whisper openai pykakasi
     4. streamlit run app.py
        サイドバーで「Whisperエンジン = mlx-whisper」「LLM = ローカル(Ollama・Mac向け)」を選び、
        Ollamaのモデル名(`ollama list` で表示される名前)を入力する
@@ -541,6 +541,104 @@ def highlight_diff_html(raw_text: str, corrected_text: str) -> str:
     return "".join(html_parts).replace("\n", "<br>")
 
 
+# 音の照合に使う、診療科を問わない基本的な医学用語。サイドバーで追加・ファイル読み込みができる。
+DEFAULT_SOUND_TERMS = """診察 問診 触診 聴診 視診 打診 皮膚 発汗 多汗 暑がり 寒がり 動悸 息切れ 倦怠感
+食欲 食欲不振 食欲亢進 体重減少 体重増加 発熱 頭痛 腹痛 胸痛 背部痛 腰痛 嘔気 嘔吐 下痢 便秘 血便
+浮腫 振戦 しびれ めまい 失神 咳嗽 喀痰 呼吸困難 喘鳴 月経不順 不順 甲状腺 腫大 びまん性 結節
+眼球突出 頻脈 徐脈 不整脈 心房細動 血圧 脈拍 呼吸音 心雑音 湿性ラ音 浸潤影 胸水 著明 軽度 中等度 高度
+遊離T4 遊離T3 血液検査 採血 尿検査 心電図 圧痛 反跳痛 筋性防御 腹部膨満 黄疸 貧血 蕁麻疹 発疹
+呂律 構音障害 顔面神経麻痺 片麻痺 意識障害 脂質異常症 糖尿病 高血圧 既往歴 家族歴 服薬 内服 頓服"""
+
+_kakasi = None
+
+
+def to_reading_tokens(text: str) -> list:
+    """文字列を(表記, ひらがな読み)のトークン列に分ける。英数字はそのまま読みとして扱う。"""
+    global _kakasi
+    if _kakasi is None:
+        import pykakasi
+
+        _kakasi = pykakasi.kakasi()
+    return [(t["orig"], t["hira"]) for t in _kakasi.convert(text) if t["orig"]]
+
+
+def parse_term_list(raw: str) -> list:
+    terms = re.split(r"[\s、,，・/]+", raw)
+    return list(dict.fromkeys(t.strip() for t in terms if t.strip()))
+
+
+@st.cache_resource
+def build_sound_index(terms: tuple):
+    """用語の読みを2文字ずつに分けた索引を作る。大きな用語リストでも照合が速くなるように。"""
+    entries, index = [], {}
+    for term in terms:
+        reading = "".join(h for _, h in to_reading_tokens(term))
+        if len(reading) < 3:  # 2文字以下の読みは偶然の一致が多すぎるため対象外
+            continue
+        idx = len(entries)
+        entries.append((term, reading))
+        for i in range(len(reading) - 1):
+            index.setdefault(reading[i : i + 2], set()).add(idx)
+    return entries, index
+
+
+HIRAGANA_ONLY = re.compile(r"^[\u3040-\u309fー、。,.？！?!\s]*$")
+
+
+def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_tokens: int = 6) -> list:
+    """読みが用語リストの語に近いのに表記が違う箇所を探す(例:「有利T4」→「遊離T4」)。
+    誤りの書き方ではなく正しい用語だけを登録すればよいので、未知の誤変換にも対応できる。
+    戻り値: (開始位置, 終了位置, 元の表記, 候補の用語, 類似度) のリスト(重なりなし)
+    """
+    toks = to_reading_tokens(text)
+    starts, pos = [], 0
+    for surf, _ in toks:
+        found_at = text.find(surf, pos)
+        starts.append(found_at if found_at >= 0 else pos)
+        pos = starts[-1] + len(surf)
+
+    found = []
+    for i in range(len(toks)):
+        surface, reading = "", ""
+        for j in range(i, min(i + max_tokens, len(toks))):
+            surface += toks[j][0]
+            reading += toks[j][1]
+            if len(reading) < 3 or HIRAGANA_ONLY.match(surface) or surface in term_set:
+                continue
+            cands = set()
+            for k in range(len(reading) - 1):
+                cands |= index.get(reading[k : k + 2], set())
+            for idx in cands:
+                term, term_reading = entries[idx]
+                if abs(len(term_reading) - len(reading)) > 2 or term in surface or surface in term:
+                    continue
+                ratio = difflib.SequenceMatcher(None, reading, term_reading).ratio()
+                # 短い語は読みが完全一致する場合のみ(偶然の一致を避ける)
+                if ratio >= (1.0 if len(term_reading) <= 3 else 0.75):
+                    found.append((starts[i], starts[i] + len(surface), surface, term, ratio))
+
+    # 類似度の高い順に、重ならないものだけを残す(「腸鳴」と「腸鳴に」のような重複を除く)
+    found.sort(key=lambda f: (-f[4], f[1] - f[0]))
+    chosen, used = [], set()
+    for f in found:
+        span = set(range(f[0], f[1]))
+        if not span & used:
+            chosen.append(f)
+            used |= span
+    return sorted(chosen)
+
+
+def apply_sound_replacements(text: str, matches: list, accepted_pairs: set) -> str:
+    out, last = [], 0
+    for start, end, surface, term, _ in matches:
+        if (surface, term) in accepted_pairs:
+            out.append(text[last:start])
+            out.append(term)
+            last = end
+    out.append(text[last:])
+    return "".join(out)
+
+
 PUNCTUATION = set("。、，．,.!?！？ 　\n")
 
 
@@ -622,6 +720,16 @@ with st.sidebar:
         height=100,
         help="よく起きる音声認識の誤りを登録しておくと、②の前に機械的に置き換えます。"
         "LLMより確実で、登録した以外の変更はしません。",
+    )
+    sound_terms_raw = st.text_area(
+        "音照合用の医学用語リスト(正しい表記)",
+        DEFAULT_SOUND_TERMS,
+        height=120,
+        help="文字起こしの中で、読みがこれらの語に近いのに表記が違う箇所を修正候補として出します"
+        "(例:「有利T4」→「遊離T4」)。誤り方ではなく正しい用語を登録します。医学用語ヒントの語も自動で含めます。",
+    )
+    sound_terms_file = st.file_uploader(
+        "用語リストのファイル(任意・1行1語のtxt、または1列目が用語のcsv)", type=["txt", "csv"]
     )
     st.divider()
     llm_backend = st.radio(
@@ -710,7 +818,61 @@ if uploaded_file:
         dict_segments = [
             {**seg, "text": apply_correction_dict(seg["text"], correction_rules, dict_applied)} for seg in segments
         ]
-        raw_text = apply_correction_dict(result["text"], correction_rules, {})
+
+        st.divider()
+        st.subheader("①-2 用語の音照合")
+        st.caption(
+            "読みが医学用語リストの語に近いのに、表記が違う箇所を修正候補として出します。"
+            "チェックを入れたものだけが②以降に反映されます。"
+        )
+        sound_terms = parse_term_list(sound_terms_raw) + parse_term_list(medical_terms)
+        if sound_terms_file is not None:
+            content = sound_terms_file.getvalue().decode("utf-8", errors="ignore")
+            for line in content.splitlines():
+                first = line.split(",")[0].strip().strip('"')
+                if first:
+                    sound_terms.append(first)
+        sound_terms = tuple(dict.fromkeys(sound_terms))
+        try:
+            entries, index = build_sound_index(sound_terms)
+            term_set = set(sound_terms)
+            seg_matches = [find_sound_alike(seg["text"], entries, index, term_set) for seg in dict_segments]
+        except ImportError:
+            st.warning("音照合には pykakasi が必要です: `pip install pykakasi`")
+            seg_matches = [[] for _ in dict_segments]
+
+        pairs = {}
+        for seg, matches in zip(dict_segments, seg_matches):
+            for start, end, surface, term, ratio in matches:
+                p = pairs.setdefault((surface, term), {"ratio": ratio, "count": 0, "context": ""})
+                p["count"] += 1
+                if not p["context"]:
+                    p["context"] = (seg["text"][max(0, start - 8) : start], seg["text"][end : end + 8])
+
+        sound_key = abs(hash(result["text"])) % 10**8
+        accepted_pairs = set()
+        if not pairs:
+            st.info("用語リストと音が近い表記ゆれは見つかりませんでした。")
+        else:
+            pair_list = sorted(pairs.items(), key=lambda kv: -kv[1]["ratio"])
+            if st.button("すべて採用", key="sound_accept_all"):
+                for i in range(len(pair_list)):
+                    st.session_state[f"snd_{sound_key}_{i}"] = True
+            for i, ((surface, term), info) in enumerate(pair_list):
+                before, after = info["context"]
+                label = (
+                    f"…{md_escape(before)} :red[~~{md_escape(surface)}~~] → :green[**{md_escape(term)}**] "
+                    f"{md_escape(after)}… (類似度 {info['ratio']:.2f}・{info['count']}箇所)"
+                )
+                if st.checkbox(label, key=f"snd_{sound_key}_{i}"):
+                    accepted_pairs.add((surface, term))
+            st.caption(f"採用 {len(accepted_pairs)} 件 / 全 {len(pair_list)} 件")
+
+        dict_segments = [
+            {**seg, "text": apply_sound_replacements(seg["text"], matches, accepted_pairs)}
+            for seg, matches in zip(dict_segments, seg_matches)
+        ]
+        raw_text = "".join(seg["text"] for seg in dict_segments)
         backend_ready = bool(api_key) if llm_backend == "OpenAI API (GPT-4o)" else bool(local_model_path)
         backend_error = (
             "サイドバーにOpenAI APIキーを入力してください。"
