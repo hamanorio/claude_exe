@@ -344,6 +344,7 @@ def infer_speakers_from_text(segments, backend: str, api_key: str, local_model_p
 
 SPEAKER_CHUNK = 40  # 話者推定で一度にLLMへ渡す文の数
 CHUNK_CHARS = 1200  # ③④⑤で一度にLLMへ渡す文字数の目安
+CORRECTION_CHUNK_CHARS = 2500  # ③(修正箇所の一覧だけを出力させる)で一度に渡す文字数
 
 
 def label_speaker_chunk(chunk, offset, context, backend, api_key, local_model_path) -> dict:
@@ -418,7 +419,8 @@ def split_into_chunks(text: str, max_chars: int = CHUNK_CHARS) -> list:
 
 def correct_with_llm(raw_text, backend, api_key, local_model_path, medical_terms="", progress=None):
     """長い会話は分割して補正し、つなぎ直す。progress(i, n) で進み具合を知らせる。"""
-    chunks = split_into_chunks(raw_text)
+    # 出力は修正箇所の一覧だけで短いので、③は大きめの単位で分けて呼び出し回数を減らす
+    chunks = split_into_chunks(raw_text, max_chars=CORRECTION_CHUNK_CHARS)
     out = []
     for i, c in enumerate(chunks):
         if progress:
@@ -432,39 +434,52 @@ def correct_with_llm(raw_text, backend, api_key, local_model_path, medical_terms
 def correct_chunk_with_llm(
     raw_text: str, backend: str, api_key: str, local_model_path: str, medical_terms: str = ""
 ) -> str:
-    prompt = f"""以下は、医師と患者の診察会話を音声認識(Whisper)で文字起こししたテキストです。
-話者ラベル(医師:/患者:)が付いている場合は、そのラベルと発言の区切りを維持してください。
-音声認識特有の誤変換(医学用語が似た音の別の言葉に変換されている等)が含まれている可能性があります。
-文脈から医学的に正しいと考えられる形に修正してください。
+    """誤変換の箇所だけを「誤 → 正」の形でLLMに答えさせ、プログラム側で本文に当てはめる。
+    全文を書き直させる方式より出力が短いので、ローカルLLMでも数倍速い。
+    また、本文に実在する語しか置き換えないので、LLMが文を削ったり書き足したりできない。
+    """
+    prompt = f"""以下は、医師と患者の診察会話を音声認識で文字起こししたテキストです。
+音声認識特有の誤変換(医学用語が、似た音の別の言葉や漢字になっている等)を探してください。
 
 誤変換の典型例(同じ音・似た音の別の漢字や単語になっている):
-- 「方針経過」→「経過観察」のように語順や漢字が崩れたもの
 - 「関節」と「間接」、「意志」と「医師」のような同音異義語の取り違え
 - 医学用語が、意味の通らない一般語の組み合わせになっているもの
   (例:「心房最同」→「心房細動」、「指示異常賞」→「脂質異常症」)
-一文ずつ「医学的な会話として意味が通るか」を確認し、通らない箇所は音の近い医学用語を検討してください。
 
 この会話には、次のような用語が出てくる可能性があります(医師が事前に指定したもの):
 {medical_terms}
-ただし、聞き取れなかった可能性がある情報を、典型的な症例パターンから推測して新たに追加することは絶対にしないでください。
-意味が不明瞭、または欠落している可能性がある箇所は、無理に埋めず、そのまま残してください。
 
-出力は修正後の会話テキストだけにしてください。修正点の一覧や説明は書かないでください。
+答え方:
+- 見つけた誤変換を1行に1つ、「元の表記 → 修正後の表記」の形で書いてください。
+- 元の表記は、テキスト中の文字をそのまま(一字一句同じに)書き写してください。
+- 聞き取れなかった内容を推測で補うことや、言い回しを整えることはしないでください。
+- 確信が持てない箇所は書かないでください。
+- 誤変換が無ければ「なし」とだけ書いてください。
 
-【音声認識結果】
+【文字起こし】
 {raw_text}
 
-【修正後のテキスト】
+【誤変換の一覧】
 """
-    return strip_commentary(run_llm(prompt, backend, api_key, local_model_path))
+    output = run_llm(prompt, backend, api_key, local_model_path)
+    return apply_llm_corrections(raw_text, output)
 
 
-def strip_commentary(text: str) -> str:
-    """ローカルLLMは指示しても「修正点:」のような説明を末尾に付けることがある。
-    説明はカルテ本文に混ざると危険(実際には行っていない修正を書くこともある)なので切り捨てる。
-    """
-    m = re.search(r"[*#]*\s*(修正点|修正内容|変更点|修正箇所|補足|注記|説明)\s*[*]*\s*[:：]", text)
-    return text[: m.start()].strip() if m else text.strip()
+def apply_llm_corrections(text: str, llm_output: str) -> str:
+    """LLMが挙げた「誤 → 正」のうち、本文に実在する語の置き換えだけを適用する。
+    話者ラベルや改行には触れない。修正後が空(削除)の提案は適用しない。"""
+    for line in llm_output.splitlines():
+        line = re.sub(r"^\s*(?:[-・*]|\d+[.)、])\s*", "", line).strip()
+        parts = re.split(r"\s*(?:→|->|=>|⇒)\s*", line, maxsplit=1)
+        if len(parts) != 2:
+            continue
+        wrong, right = (p.strip().strip("「」『』\"'") for p in parts)
+        if not wrong or not right or wrong == right or wrong not in text:
+            continue
+        if wrong in ("医師", "患者") or "：" in wrong or ":" in wrong:
+            continue  # 話者ラベルは書き換えさせない
+        text = text.replace(wrong, right)
+    return text
 
 
 def parse_correction_dict(raw: str) -> list:
