@@ -189,6 +189,23 @@ def load_kotoba_pipeline(model_id: str):
     return pipeline("automatic-speech-recognition", model=model_id, torch_dtype=dtype, device=device)
 
 
+def load_audio_16k(audio_path: str):
+    """ffmpegでファイルを直接読み、16kHzモノラルの波形にする。
+    transformersに「ファイルのパス」を渡すと内部でパイプ経由でffmpegに流すため、
+    m4a(iPhone・Macのボイスメモ等)のように末尾に目次情報がある形式を読めないことがある。
+    """
+    import subprocess
+
+    import numpy as np
+
+    cmd = ["ffmpeg", "-nostdin", "-i", audio_path, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0 or not proc.stdout:
+        err = proc.stderr.decode("utf-8", errors="ignore").strip().splitlines()[-3:]
+        raise RuntimeError("ffmpegで音声を読み込めませんでした: " + " / ".join(err))
+    return np.frombuffer(proc.stdout, np.int16).astype(np.float32) / 32768.0
+
+
 def transcribe_kotoba(audio_path: str, model_id: str) -> dict:
     """日本語に特化して学習されたWhisper系モデル(kotoba-whisper)で文字起こしする。
     出力をopenai-whisperと同じ形({"text", "segments"})にそろえる。
@@ -197,7 +214,7 @@ def transcribe_kotoba(audio_path: str, model_id: str) -> dict:
     """
     pipe = load_kotoba_pipeline(model_id)
     out = pipe(
-        audio_path,
+        {"raw": load_audio_16k(audio_path), "sampling_rate": 16000},
         chunk_length_s=15,
         batch_size=8,
         return_timestamps=True,
