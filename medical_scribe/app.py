@@ -344,6 +344,7 @@ def infer_speakers_from_text(segments, backend: str, api_key: str, local_model_p
 
 SPEAKER_CHUNK = 40  # 話者推定で一度にLLMへ渡す文の数
 CHUNK_CHARS = 1200  # ③④⑤で一度にLLMへ渡す文字数の目安
+MAX_CORRECTION_LEN = 15  # ③で1件として受け付ける「元の表記」の最大文字数(語句単位に限る)
 CORRECTION_CHUNK_CHARS = 2500  # ③(修正箇所の一覧だけを出力させる)で一度に渡す文字数
 
 
@@ -454,6 +455,7 @@ def correct_chunk_with_llm(
 - 元の表記は、テキスト中の文字をそのまま(一字一句同じに)書き写してください。
 - 聞き取れなかった内容を推測で補うことや、言い回しを整えることはしないでください。
 - 確信が持てない箇所は書かないでください。
+- 句読点(、。？)の追加や修正は不要です。文全体を書き写さず、間違っている語だけを書いてください。
 - 誤変換が無ければ「なし」とだけ書いてください。
 
 【文字起こし】
@@ -478,6 +480,8 @@ def apply_llm_corrections(text: str, llm_output: str) -> str:
             continue
         if wrong in ("医師", "患者") or "：" in wrong or ":" in wrong:
             continue  # 話者ラベルは書き換えさせない
+        if is_punctuation_only(wrong, right) or len(wrong) > MAX_CORRECTION_LEN:
+            continue  # 句読点だけの修正や、文ごとの書き直しは誤変換の修正ではないので使わない
         text = text.replace(wrong, right)
     return text
 
@@ -1257,6 +1261,14 @@ if uploaded_file:
         st.divider()
         st.subheader("③ LLMによる文脈補正")
 
+        st.caption(
+            "①-2の音照合で直しきれなかった誤変換をLLMに探させます。"
+            "時間がかかるので、①-2で十分直っている場合はスキップできます。"
+        )
+        if st.button("③をスキップ(LLM補正なしで④へ進む)"):
+            st.session_state.corrected = text_for_correction
+            st.session_state.correction_base = text_for_correction
+            st.session_state.correction_run = st.session_state.get("correction_run", 0) + 1
         if st.button("LLMで補正を実行"):
             if not backend_ready:
                 st.error(backend_error)
