@@ -106,6 +106,21 @@ def generate_with_local_llm(prompt: str, model_path: str, max_new_tokens: int = 
     return tokenizer.decode(generated, skip_special_tokens=True).strip()
 
 
+def unload_ollama(model_name: str) -> None:
+    """Ollamaに読み込まれているモデルをメモリから外す(次に使うときは自動で再読み込みされる)。
+    16GBのMacでは、文字起こし中にSwallow(約5GB)が載ったままだとメモリが足りなくなるため。
+    """
+    try:
+        req = urllib.request.Request(
+            OLLAMA_URL.replace("/api/chat", "/api/generate"),
+            data=json.dumps({"model": model_name, "keep_alive": 0}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=10).read()
+    except Exception:
+        pass  # Ollamaが起動していない等。文字起こし自体には影響しない
+
+
 def generate_with_ollama(prompt: str, model_name: str, json_mode: bool = False) -> str:
     """Mac上のOllama(量子化済みSwallow)で生成する。データはMacの外に出ない。"""
     payload = {
@@ -216,10 +231,18 @@ def transcribe_kotoba(audio_path: str, model_id: str) -> dict:
     out = pipe(
         {"raw": load_audio_16k(audio_path), "sampling_rate": 16000},
         chunk_length_s=15,
-        batch_size=8,
+        # 16GBのMacでは一度に複数区間を処理するとメモリを使い切りやすいので1区間ずつにする
+        batch_size=1,
         return_timestamps=True,
         generate_kwargs={"language": "ja", "task": "transcribe"},
     )
+    try:
+        import torch
+
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()  # 次の処理(Swallow等)のためにGPUメモリを返す
+    except Exception:
+        pass
     segments, last_end = [], 0.0
     for chunk in out.get("chunks", []):
         start, end = chunk.get("timestamp", (None, None))
@@ -914,6 +937,8 @@ if uploaded_file:
         st.session_state.play_start = 0
 
     if st.button("① 文字起こしを実行", type="primary"):
+        if llm_backend == "ローカル(Ollama・Mac向け)" and local_model_path:
+            unload_ollama(local_model_path)
         with st.spinner(f"{whisper_engine}で文字起こし中...(初回はモデルのダウンロードに時間がかかります)"):
             st.session_state.result = transcribe(audio_path, medical_terms, model_size, whisper_engine)
         st.session_state.pop("corrected", None)
