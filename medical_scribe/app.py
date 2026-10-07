@@ -302,7 +302,35 @@ def infer_speakers_from_text(segments, backend: str, api_key: str, local_model_p
     組み立て直すので、LLMが文の区切りを勝手に変えたり、本文を書き換えたりできない。
     """
     units = split_utterances(segments)
-    numbered = "\n".join(f"{i + 1}. {u}" for i, u in enumerate(units))
+    all_labels = {}
+    # 長い会話は SPEAKER_CHUNK 文ずつに分けて推定する(ローカルLLMの入力・出力の上限と速度のため)。
+    # 区切り目の判断が崩れないよう、直前の数文とその推定結果を文脈として添える。
+    for start in range(0, len(units), SPEAKER_CHUNK):
+        chunk = units[start : start + SPEAKER_CHUNK]
+        context = "\n".join(
+            f"{all_labels.get(j + 1, '不明')}：{units[j]}" for j in range(max(0, start - 3), start)
+        )
+        all_labels.update(
+            label_speaker_chunk(chunk, start, context, backend, api_key, local_model_path)
+        )
+
+    lines = []
+    for i, unit in enumerate(units):
+        speaker = all_labels.get(i + 1, "不明")
+        if lines and lines[-1][0] == speaker:
+            lines[-1][1] += unit
+        else:
+            lines.append([speaker, unit])
+    return "\n".join(f"{sp}：{text}" for sp, text in lines)
+
+
+SPEAKER_CHUNK = 40  # 話者推定で一度にLLMへ渡す文の数
+CHUNK_CHARS = 1200  # ③④⑤で一度にLLMへ渡す文字数の目安
+
+
+def label_speaker_chunk(chunk, offset, context, backend, api_key, local_model_path) -> dict:
+    numbered = "\n".join(f"{offset + i + 1}. {u}" for i, u in enumerate(chunk))
+    context_block = f"【直前の会話(参考。回答は不要)】\n{context}\n\n" if context else ""
     prompt = f"""以下は、医師と患者の診察会話の文字起こしを、文ごとに番号を付けて並べたものです。
 各文が「医師」と「患者」のどちらの発言かを、前後の流れから判断してください。
 
@@ -335,27 +363,50 @@ def infer_speakers_from_text(segments, backend: str, api_key: str, local_model_p
 
 出力は1行に1つ、「番号: 医師」または「番号: 患者」の形式だけで、全ての番号について答えてください。本文は書かないでください。
 
-【文字起こし】
+{context_block}【文字起こし】
 {numbered}
 
 【回答】
 """
     output = run_llm(prompt, backend, api_key, local_model_path)
+    valid = range(offset + 1, offset + len(chunk) + 1)
     labels = {}
     for m in re.finditer(r"(\d+)\s*[.:：、)]\s*(医師|患者)", output):
-        labels[int(m.group(1))] = m.group(2)
+        if int(m.group(1)) in valid:
+            labels[int(m.group(1))] = m.group(2)
+    return labels
 
-    lines = []
-    for i, unit in enumerate(units):
-        speaker = labels.get(i + 1, "不明")
-        if lines and lines[-1][0] == speaker:
-            lines[-1][1] += unit
+
+def split_into_chunks(text: str, max_chars: int = CHUNK_CHARS) -> list:
+    """長い会話を、行(話者ごとの発言)の区切りで max_chars 程度ずつに分ける。
+    1行が長すぎる場合は句点で分ける(分けた文同士は改行を入れずにつなぐ)。"""
+    pieces = []  # (文字列, 前に改行が必要か)
+    for line in text.splitlines():
+        if len(line) <= max_chars:
+            pieces.append((line, True))
         else:
-            lines.append([speaker, unit])
-    return "\n".join(f"{sp}：{text}" for sp, text in lines)
+            sents = [p for p in re.split(r"(?<=[。！？!?])", line) if p]
+            pieces += [(p, i == 0) for i, p in enumerate(sents)]
+    chunks, cur = [], ""
+    for piece, newline in pieces:
+        if cur and len(cur) + len(piece) > max_chars:
+            chunks.append(cur)
+            cur = ""
+        cur = piece if not cur else cur + ("\n" if newline else "") + piece
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
-def correct_with_llm(
+def correct_with_llm(raw_text, backend, api_key, local_model_path, medical_terms=""):
+    """長い会話は分割して補正し、つなぎ直す。"""
+    return "\n".join(
+        correct_chunk_with_llm(c, backend, api_key, local_model_path, medical_terms)
+        for c in split_into_chunks(raw_text)
+    )
+
+
+def correct_chunk_with_llm(
     raw_text: str, backend: str, api_key: str, local_model_path: str, medical_terms: str = ""
 ) -> str:
     prompt = f"""以下は、医師と患者の診察会話を音声認識(Whisper)で文字起こししたテキストです。
@@ -471,6 +522,13 @@ def confidence_badge(avg_logprob) -> str:
 
 
 def check_vague_terms(text: str, backend: str, api_key: str, local_model_path: str) -> str:
+    """長い会話は分割してチェックし、指摘をまとめる。"""
+    flags = [check_vague_terms_chunk(c, backend, api_key, local_model_path) for c in split_into_chunks(text)]
+    flags = [f for f in flags if f and not f.startswith(NO_FLAG_PHRASE)]
+    return "\n\n".join(flags) if flags else NO_FLAG_PHRASE + "。"
+
+
+def check_vague_terms_chunk(text: str, backend: str, api_key: str, local_model_path: str) -> str:
     prompt = f"""以下はカルテ下書きです。
 次の2種類の箇所を探して、音声認識の誤りの可能性があるとして指摘してください。
 
@@ -565,6 +623,18 @@ def is_paraphrased(item: str, text: str) -> bool:
 
 
 def extract_structured_findings(text: str, backend: str, api_key: str, local_model_path: str) -> list:
+    """長い会話は分割して抽出し、同じ項目名の重複を除いてまとめる。"""
+    merged, seen = [], set()
+    for c in split_into_chunks(text):
+        for f in extract_findings_chunk(c, backend, api_key, local_model_path):
+            key = re.sub(r"\s", "", str(f.get("item", "")))
+            if key and key not in seen:
+                seen.add(key)
+                merged.append(f)
+    return merged
+
+
+def extract_findings_chunk(text: str, backend: str, api_key: str, local_model_path: str) -> list:
     """自由文のカルテ下書きから、診断に直結する重要所見を構造化して抽出する。
     側性(左右)や所見の有無を、自由文に埋め込まず個別項目として扱うことで、
     LLMが「不明」を正直に選べるようにし(自由文要約では確認済みの通り機能しなかった)、
