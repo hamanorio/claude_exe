@@ -671,7 +671,8 @@ def list_term_files() -> list:
     """term_lists フォルダ内の診療科別用語リスト(.txt)の名前一覧。ファイルを足せば選択肢に増える。"""
     if not os.path.isdir(TERM_LIST_DIR):
         return []
-    return sorted(f[:-4] for f in os.listdir(TERM_LIST_DIR) if f.endswith(".txt"))
+    # 「_」で始まるファイル(_除外語.txt 等)は診療科の選択肢に出さない
+    return sorted(f[:-4] for f in os.listdir(TERM_LIST_DIR) if f.endswith(".txt") and not f.startswith("_"))
 
 
 def load_term_file(name: str) -> list:
@@ -736,7 +737,9 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
         for j in range(i, min(i + max_tokens, len(toks))):
             surface += toks[j][0]
             reading += toks[j][1]
-            if len(reading) < 3 or HIRAGANA_ONLY.match(surface) or surface in term_set:
+            # 前後のひらがなを除いた中心部分(「なる症状」→「症状」)も、用語・除外語なら対象外
+            core = re.sub(r"^[\u3040-\u309f]+|[\u3040-\u309f]+$", "", surface)
+            if len(reading) < 3 or HIRAGANA_ONLY.match(surface) or surface in term_set or core in term_set:
                 continue
             cands = set()
             for k in range(len(reading) - 1):
@@ -1035,7 +1038,9 @@ if uploaded_file:
         sound_terms = tuple(dict.fromkeys(sound_terms))
         try:
             entries, index = build_sound_index(sound_terms)
-            term_set = set(sound_terms)
+            # 除外語(会話によく出る一般語)は、置き換え候補の元の語として扱わない
+            stop_words = set(load_term_file("_除外語")) if os.path.exists(os.path.join(TERM_LIST_DIR, "_除外語.txt")) else set()
+            term_set = set(sound_terms) | stop_words
             seg_matches = [find_sound_alike(seg["text"], entries, index, term_set) for seg in dict_segments]
         except ImportError:
             st.warning("音照合には pykakasi が必要です: `pip install pykakasi`")
