@@ -54,6 +54,7 @@
 
 import difflib
 import json
+import os
 import platform
 import re
 import tempfile
@@ -663,6 +664,22 @@ DEFAULT_SOUND_TERMS = """診察 問診 触診 聴診 視診 打診 皮膚 発汗
 遊離T4 遊離T3 血液検査 採血 尿検査 心電図 圧痛 反跳痛 筋性防御 腹部膨満 黄疸 貧血 蕁麻疹 発疹
 呂律 構音障害 顔面神経麻痺 片麻痺 意識障害 片頭痛 緊張型頭痛 群発頭痛 前兆 閃輝暗点 光過敏 音過敏 脂質異常症 糖尿病 高血圧 既往歴 家族歴 服薬 内服 頓服"""
 
+TERM_LIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "term_lists")
+
+
+def list_term_files() -> list:
+    """term_lists フォルダ内の診療科別用語リスト(.txt)の名前一覧。ファイルを足せば選択肢に増える。"""
+    if not os.path.isdir(TERM_LIST_DIR):
+        return []
+    return sorted(f[:-4] for f in os.listdir(TERM_LIST_DIR) if f.endswith(".txt"))
+
+
+def load_term_file(name: str) -> list:
+    path = os.path.join(TERM_LIST_DIR, name + ".txt")
+    with open(path, encoding="utf-8") as fh:
+        return [ln.strip() for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
+
+
 _kakasi = None
 
 
@@ -696,6 +713,8 @@ def build_sound_index(terms: tuple):
     return entries, index
 
 
+PARTICLE_END = re.compile(r"[はがをにのでともへや]$")
+HIRAGANA_END = re.compile(r"[\u3040-\u309f]$")
 HIRAGANA_ONLY = re.compile(r"^[\u3040-\u309fー、。,.？！?!\s]*$")
 
 
@@ -725,6 +744,9 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
             for idx in cands:
                 term, term_reading = entries[idx]
                 if abs(len(term_reading) - len(reading)) > 2 or term in surface or surface in term:
+                    continue
+                # 「脈は」→「脈拍」のように、助詞で終わる区切りを漢字で終わる用語と取り違えない
+                if PARTICLE_END.search(surface) and not HIRAGANA_END.search(term):
                     continue
                 ratio = difflib.SequenceMatcher(None, reading, term_reading).ratio()
                 # 短い語は読みが完全一致する場合のみ(偶然の一致を避ける)
@@ -883,12 +905,20 @@ with st.sidebar:
         help="よく起きる音声認識の誤りを登録しておくと、②の前に機械的に置き換えます。"
         "LLMより確実で、登録した以外の変更はしません。",
     )
-    sound_terms_raw = st.text_area(
-        "音照合用の医学用語リスト(正しい表記)",
-        DEFAULT_SOUND_TERMS,
-        height=120,
+    term_files = list_term_files()
+    selected_term_files = st.multiselect(
+        "音照合に使う診療科の用語リスト",
+        term_files,
+        default=[f for f in term_files if "内科一般" in f],
         help="文字起こしの中で、読みがこれらの語に近いのに表記が違う箇所を修正候補として出します"
-        "(例:「有利T4」→「遊離T4」)。誤り方ではなく正しい用語を登録します。医学用語ヒントの語も自動で含めます。",
+        "(例:「有利T4」→「遊離T4」)。リストは medical_scribe/term_lists/ のtxtファイルで、"
+        "1行1語で編集・追加できます(新しいファイルを置けば選択肢に増えます)。",
+    )
+    sound_terms_raw = st.text_area(
+        "追加の用語(自分用・任意)",
+        "" if term_files else DEFAULT_SOUND_TERMS,
+        height=80,
+        help="リストに無い用語をここに足せます(空白・読点・改行区切り)。医学用語ヒントの語も自動で含めます。",
     )
     sound_terms_file = st.file_uploader(
         "用語リストのファイル(任意・1行1語のtxt、または1列目が用語のcsv)", type=["txt", "csv"]
@@ -994,6 +1024,8 @@ if uploaded_file:
             "チェックを入れたものだけが②以降に反映されます。"
         )
         sound_terms = parse_term_list(sound_terms_raw) + parse_term_list(medical_terms)
+        for name in selected_term_files:
+            sound_terms += load_term_file(name)
         if sound_terms_file is not None:
             content = sound_terms_file.getvalue().decode("utf-8", errors="ignore")
             for line in content.splitlines():
