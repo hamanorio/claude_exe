@@ -46,6 +46,7 @@
        またはダウンロードしたGGUFから:
          echo "FROM ./ファイル名.gguf" > Modelfile && ollama create swallow-8b -f Modelfile
     3. pip install streamlit mlx-whisper openai pykakasi
+       (日本語特化の kotoba-whisper も使う場合: pip install transformers torch)
     4. streamlit run app.py
        サイドバーで「Whisperエンジン = mlx-whisper」「LLM = ローカル(Ollama・Mac向け)」を選び、
        Ollamaのモデル名(`ollama list` で表示される名前)を入力する
@@ -171,8 +172,53 @@ def load_whisper_model(model_size: str):
     return whisper.load_model(model_size)
 
 
+KOTOBA_DEFAULT_MODEL = "kotoba-tech/kotoba-whisper-v2.0"
+
+
+@st.cache_resource
+def load_kotoba_pipeline(model_id: str):
+    import torch
+    from transformers import pipeline
+
+    if torch.backends.mps.is_available():
+        device, dtype = "mps", torch.float16
+    elif torch.cuda.is_available():
+        device, dtype = "cuda:0", torch.float16
+    else:
+        device, dtype = "cpu", torch.float32
+    return pipeline("automatic-speech-recognition", model=model_id, torch_dtype=dtype, device=device)
+
+
+def transcribe_kotoba(audio_path: str, model_id: str) -> dict:
+    """日本語に特化して学習されたWhisper系モデル(kotoba-whisper)で文字起こしする。
+    出力をopenai-whisperと同じ形({"text", "segments"})にそろえる。
+    このモデルは信頼度(avg_logprob)を返さないので、セグメントの信頼度は「なし」になる。
+    医学用語ヒント(initial_prompt)は使わない(用語の補正は①-2の音照合で行う)。
+    """
+    pipe = load_kotoba_pipeline(model_id)
+    out = pipe(
+        audio_path,
+        chunk_length_s=15,
+        batch_size=8,
+        return_timestamps=True,
+        generate_kwargs={"language": "ja", "task": "transcribe"},
+    )
+    segments, last_end = [], 0.0
+    for chunk in out.get("chunks", []):
+        start, end = chunk.get("timestamp", (None, None))
+        start = last_end if start is None else start
+        end = start if end is None else end
+        text = chunk.get("text", "").strip()
+        if text:
+            segments.append({"start": start, "end": end, "text": text, "avg_logprob": None})
+        last_end = end
+    return {"text": "".join(seg["text"] for seg in segments), "segments": segments}
+
+
 def transcribe(audio_path: str, medical_terms: str, model_size: str, engine: str = "openai-whisper"):
     initial_prompt = f"これは医師と患者の診察会話です。次のような医学用語が含まれます: {medical_terms}"
+    if engine == "kotoba-whisper(日本語特化)":
+        return transcribe_kotoba(audio_path, model_size)
     if engine == "mlx-whisper":
         # Apple SiliconのGPUで動く。出力形式(segments/avg_logprob等)はopenai-whisperと同じ
         import mlx_whisper
@@ -372,7 +418,9 @@ def speaker_badge(speaker: str) -> str:
     return f"<span style='background-color:{color}; color:white; padding:2px 8px; border-radius:4px; font-size:0.85em;'>{speaker}</span>"
 
 
-def confidence_badge(avg_logprob: float) -> str:
+def confidence_badge(avg_logprob) -> str:
+    if avg_logprob is None:
+        return "⚪ 信頼度なし"
     if avg_logprob < -1.0:
         return "🔴 低信頼"
     elif avg_logprob < -0.5:
@@ -756,14 +804,24 @@ st.caption("AIの出力をそのまま信じず、怪しい箇所は音声に戻
 with st.sidebar:
     st.header("設定")
     whisper_engine = st.radio(
-        "Whisperエンジン",
-        ["openai-whisper", "mlx-whisper"],
+        "音声認識エンジン",
+        ["openai-whisper", "mlx-whisper", "kotoba-whisper(日本語特化)"],
         # Apple Silicon の Mac では mlx-whisper を初期選択にする(再起動のたびに選び直さなくて済むように)
         index=1 if IS_APPLE_SILICON else 0,
-        help="Mac(Apple Silicon)では mlx-whisper の方が大幅に速く動きます。",
+        help="Mac(Apple Silicon)では mlx-whisper の方が大幅に速く動きます。"
+        "kotoba-whisper は日本語の音声で学習し直したモデルで、日本語の誤変換が減る可能性があります"
+        "(要 `pip install transformers torch`)。同じ音声で切り替えて①を実行すると比較できます。",
     )
-    whisper_sizes = ["medium", "large-v3", "large-v3-turbo"] if whisper_engine == "mlx-whisper" else ["medium", "large-v3"]
-    model_size = st.selectbox("Whisperモデルサイズ", whisper_sizes, index=len(whisper_sizes) - 1)
+    if whisper_engine == "kotoba-whisper(日本語特化)":
+        model_size = st.text_input(
+            "kotoba-whisperのモデル",
+            KOTOBA_DEFAULT_MODEL,
+            help="Hugging Faceのモデル名。初回は自動でダウンロードされます(約1.5GB)。",
+        )
+        st.caption("※ このエンジンは医学用語ヒントを使いません。用語の補正は①-2の音照合で行います。")
+    else:
+        whisper_sizes = ["medium", "large-v3", "large-v3-turbo"] if whisper_engine == "mlx-whisper" else ["medium", "large-v3"]
+        model_size = st.selectbox("Whisperモデルサイズ", whisper_sizes, index=len(whisper_sizes) - 1)
     medical_terms = st.text_area(
         "医学用語ヒント(initial_prompt用)",
         "呂律、構音障害、顔面神経麻痺、心房細動、不整脈、脂質異常症、浸潤影、湿性ラ音",
@@ -839,7 +897,7 @@ if uploaded_file:
         st.session_state.play_start = 0
 
     if st.button("① 文字起こしを実行", type="primary"):
-        with st.spinner("Whisperで文字起こし中..."):
+        with st.spinner(f"{whisper_engine}で文字起こし中...(初回はモデルのダウンロードに時間がかかります)"):
             st.session_state.result = transcribe(audio_path, medical_terms, model_size, whisper_engine)
         st.session_state.pop("corrected", None)
         st.session_state.pop("speaker_turns", None)
@@ -868,7 +926,7 @@ if uploaded_file:
         if "speaker_turns" not in st.session_state and enable_diarization:
             st.caption("※ 話者分離の結果がありません。①のボタンをもう一度押して実行してください。")
         for i, seg in enumerate(segments):
-            badge = confidence_badge(seg["avg_logprob"])
+            badge = confidence_badge(seg.get("avg_logprob"))
             speaker_html = speaker_badge(seg["speaker"]) + "&nbsp;&nbsp;" if "speaker" in seg else ""
             col1, col2 = st.columns([9, 1])
             with col1:
