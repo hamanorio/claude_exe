@@ -712,38 +712,39 @@ def md_escape(text: str) -> str:
     return re.sub(r"([*_~`\\\[\]])", r"\\\1", text)
 
 
-def build_chart_draft(text: str, findings: list) -> str:
-    """確定した会話と確認済みの所見から、SOAP形式のカルテ下書きを組み立てる。
-    LLMは使わず、会話の文と医師が確認した項目をそのまま並べるだけにする
-    (要約の段階で新たな言い換えや推測が入らないようにするため)。
-    A(評価)とP(計画)は医師が書く欄として空けておく。
-    """
-    patient, doctor = [], []
-    for line in text.splitlines():
-        m = re.match(r"\s*(医師|患者)\s*[:：]\s*(.*)", line)
-        if not m or not m.group(2).strip():
-            continue
-        if m.group(1) == "患者":
-            patient.append(m.group(2).strip())
-        else:
-            # 医師の発言のうち質問は所見ではないので除く
-            for sent in re.split(r"(?<=[。！!])", m.group(2)):
-                sent = sent.strip()
-                if sent and not re.search(r"[？?]$", sent):
-                    doctor.append(sent)
+SOAP_SECTIONS = ["S(患者の訴え)", "O(所見・検査)"]
 
-    out = ["【S】主訴・現病歴(患者の発言)"]
-    out += [f"・{t}" for t in patient] or ["・(なし)"]
-    out += ["", "【O】医師が述べた所見・検査"]
-    out += [f"・{t}" for t in doctor] or ["・(なし)"]
-    out += ["", "【確認済み所見】"]
-    for f in findings:
+
+def guess_soap_section(item: str, value: str, text: str) -> str:
+    """項目がSかOかを、会話のどちらの話者の発言に根拠があるかで推定する。
+    項目名と内容の2文字の並びが、患者の発言と医師の発言のどちらに多く含まれるかで判断する。
+    (例:「ドキドキする感じ」は患者の発言にある→S、「全体的に腫れている」は医師の発言にある→O)
+    """
+    patient = "".join(m.group(2) for m in re.finditer(r"(患者)\s*[:：](.*)", text))
+    doctor = "".join(m.group(2) for m in re.finditer(r"(医師)\s*[:：](.*)", text))
+    chunks = re.findall(r"[\u3040-\u30ff\u4e00-\u9fffA-Za-z0-9]+", f"{item} {value}")
+    bigrams = {c[i : i + 2] for c in chunks for i in range(max(1, len(c) - 1))}
+    p_score = sum(b in patient for b in bigrams)
+    d_score = sum(b in doctor for b in bigrams)
+    return SOAP_SECTIONS[1] if d_score > p_score else SOAP_SECTIONS[0]
+
+
+def build_chart_draft(findings: list) -> str:
+    """医師が確認した所見だけから、SOAP形式のカルテ下書きを組み立てる。
+    S・Oは確認済みの項目を要約として並べる(新たにLLMで要約し直さないので、
+    確認していない言い換えや推測は入らない)。A(評価)とP(計画)は医師が書く。
+    """
+
+    def line(f):
         lat = f["laterality"]
-        lat_txt = "" if lat == "なし(左右関係なし)" else f"[{lat}]"
-        out.append(f"・{f['item']}{lat_txt}: {f['value']}")
-    if not findings:
-        out.append("・(なし)")
-    out += ["", "【A】評価", "(医師が記入)", "", "【P】計画", "(医師が記入)"]
+        lat_txt = "" if lat in ("なし(左右関係なし)", "不明") else f"({lat})"
+        return f"・{f['item']}{lat_txt}: {f['value']}"
+
+    s_items = [line(f) for f in findings if f["section"] == SOAP_SECTIONS[0]]
+    o_items = [line(f) for f in findings if f["section"] == SOAP_SECTIONS[1]]
+    out = ["【S】"] + (s_items or ["・(なし)"])
+    out += ["", "【O】"] + (o_items or ["・(なし)"])
+    out += ["", "【A】", "(医師が記入)", "", "【P】", "(医師が記入)"]
     return "\n".join(out)
 
 
@@ -1110,7 +1111,7 @@ if uploaded_file:
                 fr = st.session_state.get("findings_run", 0)
                 for i, finding in enumerate(st.session_state.findings):
                     conf_icon = "🟢" if finding.get("confidence") == "high" else "🔴"
-                    cols = st.columns([3, 2, 3, 1, 1])
+                    cols = st.columns([3, 2, 2, 3, 1, 1])
                     excluded = st.session_state.get(f"finding_ex_{fr}_{i}", False)
                     with cols[0]:
                         item_name = finding.get("item", "項目不明")
@@ -1126,6 +1127,17 @@ if uploaded_file:
                             help="⚠会話に無い語: LLMが会話中の言葉を別の用語に言い換えた項目名です。意味が合うか確認してください。",
                         )
                     with cols[1]:
+                        source = st.session_state.get("findings_source", "")
+                        guessed = guess_soap_section(item_name, finding.get("value", ""), source)
+                        st.selectbox(
+                            "区分",
+                            SOAP_SECTIONS,
+                            index=SOAP_SECTIONS.index(guessed),
+                            key=f"finding_sec_{fr}_{i}",
+                            disabled=excluded,
+                            help="カルテ下書きのS(患者の訴え)とO(所見・検査)のどちらに入れるか。会話のどちらの発言に根拠があるかで推定しています。",
+                        )
+                    with cols[2]:
                         laterality = normalize_laterality(finding.get("laterality"))
                         st.selectbox(
                             "側性",
@@ -1134,16 +1146,16 @@ if uploaded_file:
                             key=f"finding_lat_{fr}_{i}",
                             disabled=excluded,
                         )
-                    with cols[2]:
+                    with cols[3]:
                         st.text_input(
                             "内容",
                             finding.get("value", "不明"),
                             key=f"finding_val_{fr}_{i}",
                             disabled=excluded,
                         )
-                    with cols[3]:
-                        confirmed = st.checkbox("確認済", key=f"finding_ok_{fr}_{i}", disabled=excluded)
                     with cols[4]:
+                        confirmed = st.checkbox("確認済", key=f"finding_ok_{fr}_{i}", disabled=excluded)
+                    with cols[5]:
                         st.checkbox("除外", key=f"finding_ex_{fr}_{i}", help="誤って抽出された項目をカルテに含めない")
                     all_confirmed = all_confirmed and (confirmed or excluded)
 
@@ -1175,17 +1187,19 @@ if uploaded_file:
                         "item": st.session_state.get(f"finding_item_{fr}_{i}", f.get("item", "")),
                         "laterality": st.session_state.get(f"finding_lat_{fr}_{i}", "不明"),
                         "value": st.session_state.get(f"finding_val_{fr}_{i}", f.get("value", "")),
+                        "section": st.session_state.get(f"finding_sec_{fr}_{i}", SOAP_SECTIONS[0]),
                     }
                     for i, f in enumerate(st.session_state.get("findings", []))
                     if not st.session_state.get(f"finding_ex_{fr}_{i}", False)
                 ]
-                st.session_state.chart_draft = build_chart_draft(final_text, confirmed_findings)
+                st.session_state.chart_draft = build_chart_draft(confirmed_findings)
 
             if "chart_draft" in st.session_state:
                 st.divider()
                 st.subheader("⑦ カルテ下書き(SOAP)")
                 st.caption(
-                    "会話の文と確認済みの所見をそのまま並べたものです(LLMによる要約はしていません)。"
+                    "⑤で確認した所見を、区分(S/O)ごとに要約として並べたものです"
+                    "(確認していない言い換えが入らないよう、LLMで要約し直してはいません)。"
                     "A(評価)・P(計画)は医師が記入してください。"
                 )
                 draft = st.text_area("カルテ下書き", st.session_state.chart_draft, height=400)
