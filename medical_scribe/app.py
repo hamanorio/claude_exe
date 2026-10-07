@@ -712,6 +712,41 @@ def md_escape(text: str) -> str:
     return re.sub(r"([*_~`\\\[\]])", r"\\\1", text)
 
 
+def build_chart_draft(text: str, findings: list) -> str:
+    """確定した会話と確認済みの所見から、SOAP形式のカルテ下書きを組み立てる。
+    LLMは使わず、会話の文と医師が確認した項目をそのまま並べるだけにする
+    (要約の段階で新たな言い換えや推測が入らないようにするため)。
+    A(評価)とP(計画)は医師が書く欄として空けておく。
+    """
+    patient, doctor = [], []
+    for line in text.splitlines():
+        m = re.match(r"\s*(医師|患者)\s*[:：]\s*(.*)", line)
+        if not m or not m.group(2).strip():
+            continue
+        if m.group(1) == "患者":
+            patient.append(m.group(2).strip())
+        else:
+            # 医師の発言のうち質問は所見ではないので除く
+            for sent in re.split(r"(?<=[。！!])", m.group(2)):
+                sent = sent.strip()
+                if sent and not re.search(r"[？?]$", sent):
+                    doctor.append(sent)
+
+    out = ["【S】主訴・現病歴(患者の発言)"]
+    out += [f"・{t}" for t in patient] or ["・(なし)"]
+    out += ["", "【O】医師が述べた所見・検査"]
+    out += [f"・{t}" for t in doctor] or ["・(なし)"]
+    out += ["", "【確認済み所見】"]
+    for f in findings:
+        lat = f["laterality"]
+        lat_txt = "" if lat == "なし(左右関係なし)" else f"[{lat}]"
+        out.append(f"・{f['item']}{lat_txt}: {f['value']}")
+    if not findings:
+        out.append("・(なし)")
+    out += ["", "【A】評価", "(医師が記入)", "", "【P】計画", "(医師が記入)"]
+    return "\n".join(out)
+
+
 # ---------------- UI ----------------
 
 st.title("🩺 診察音声 → カルテ下書き プロトタイプ")
@@ -808,6 +843,7 @@ if uploaded_file:
         st.session_state.pop("corrected", None)
         st.session_state.pop("speaker_turns", None)
         st.session_state.pop("speaker_labeled_text_box", None)
+        st.session_state.pop("chart_draft", None)
 
         if enable_diarization:
             if not hf_token:
@@ -1132,9 +1168,32 @@ if uploaded_file:
                     for i in range(len(st.session_state.findings))
                 )
             )
-            st.button(
-                "この内容でカルテに確定する(プロトタイプでは保存処理なし)",
-                disabled=not findings_confirmed,
-            )
+            if st.button("この内容でカルテ下書きを作成する", disabled=not findings_confirmed, type="primary"):
+                fr = st.session_state.get("findings_run", 0)
+                confirmed_findings = [
+                    {
+                        "item": st.session_state.get(f"finding_item_{fr}_{i}", f.get("item", "")),
+                        "laterality": st.session_state.get(f"finding_lat_{fr}_{i}", "不明"),
+                        "value": st.session_state.get(f"finding_val_{fr}_{i}", f.get("value", "")),
+                    }
+                    for i, f in enumerate(st.session_state.get("findings", []))
+                    if not st.session_state.get(f"finding_ex_{fr}_{i}", False)
+                ]
+                st.session_state.chart_draft = build_chart_draft(final_text, confirmed_findings)
+
+            if "chart_draft" in st.session_state:
+                st.divider()
+                st.subheader("⑦ カルテ下書き(SOAP)")
+                st.caption(
+                    "会話の文と確認済みの所見をそのまま並べたものです(LLMによる要約はしていません)。"
+                    "A(評価)・P(計画)は医師が記入してください。"
+                )
+                draft = st.text_area("カルテ下書き", st.session_state.chart_draft, height=400)
+                st.download_button(
+                    "テキストファイルとして保存",
+                    draft,
+                    file_name="karte_draft.txt",
+                    mime="text/plain",
+                )
 else:
     st.info("まずは音声ファイル(mp3/wav/m4a)をアップロードしてください。")
