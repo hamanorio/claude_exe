@@ -122,13 +122,24 @@ def unload_ollama(model_name: str) -> None:
         pass  # Ollamaが起動していない等。文字起こし自体には影響しない
 
 
+OLLAMA_MAX_TOKENS = 2048  # 1回の生成の上限。ローカルLLMが同じ文を繰り返し続けて終わらないのを防ぐ
+
+
 def generate_with_ollama(prompt: str, model_name: str, json_mode: bool = False) -> str:
-    """Mac上のOllama(量子化済みSwallow)で生成する。データはMacの外に出ない。"""
+    """Mac上のOllama(量子化済みSwallow)で生成する。データはMacの外に出ない。
+    生成結果を少しずつ受け取る(ストリーミング)ので、全体に時間がかかっても途中で
+    タイムアウトしない(タイムアウトは「300秒間なにも返ってこない」場合だけ)。
+    """
     payload = {
         "model": model_name,
         "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-        "options": {"temperature": 0, "repeat_penalty": 1.15, "num_ctx": 8192},
+        "stream": True,
+        "options": {
+            "temperature": 0,
+            "repeat_penalty": 1.15,
+            "num_ctx": 8192,
+            "num_predict": OLLAMA_MAX_TOKENS,
+        },
     }
     if json_mode:
         payload["format"] = "json"
@@ -137,9 +148,16 @@ def generate_with_ollama(prompt: str, model_name: str, json_mode: bool = False) 
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=600) as res:
-        body = json.loads(res.read().decode("utf-8"))
-    return body["message"]["content"].strip()
+    parts = []
+    with urllib.request.urlopen(req, timeout=300) as res:
+        for line in res:
+            if not line.strip():
+                continue
+            msg = json.loads(line.decode("utf-8"))
+            parts.append(msg.get("message", {}).get("content", ""))
+            if msg.get("done"):
+                break
+    return "".join(parts).strip()
 
 
 def extract_json_block(text: str) -> dict:
@@ -398,12 +416,17 @@ def split_into_chunks(text: str, max_chars: int = CHUNK_CHARS) -> list:
     return chunks
 
 
-def correct_with_llm(raw_text, backend, api_key, local_model_path, medical_terms=""):
-    """長い会話は分割して補正し、つなぎ直す。"""
-    return "\n".join(
-        correct_chunk_with_llm(c, backend, api_key, local_model_path, medical_terms)
-        for c in split_into_chunks(raw_text)
-    )
+def correct_with_llm(raw_text, backend, api_key, local_model_path, medical_terms="", progress=None):
+    """長い会話は分割して補正し、つなぎ直す。progress(i, n) で進み具合を知らせる。"""
+    chunks = split_into_chunks(raw_text)
+    out = []
+    for i, c in enumerate(chunks):
+        if progress:
+            progress(i, len(chunks))
+        out.append(correct_chunk_with_llm(c, backend, api_key, local_model_path, medical_terms))
+    if progress:
+        progress(len(chunks), len(chunks))
+    return "\n".join(out)
 
 
 def correct_chunk_with_llm(
@@ -1044,6 +1067,19 @@ if uploaded_file:
             unload_ollama(local_model_path)
         with st.spinner(f"{whisper_engine}で文字起こし中...(初回はモデルのダウンロードに時間がかかります)"):
             st.session_state.result = transcribe(audio_path, medical_terms, model_size, whisper_engine)
+        if whisper_engine == "kotoba-whisper(日本語特化)":
+            # 文字起こし用のモデルをメモリから外し、②以降のSwallowに空ける(16GBのMac向け)
+            load_kotoba_pipeline.clear()
+            import gc
+
+            gc.collect()
+            try:
+                import torch
+
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+            except Exception:
+                pass
         st.session_state.pop("corrected", None)
         st.session_state.pop("speaker_turns", None)
         st.session_state.pop("speaker_labeled_text_box", None)
@@ -1211,9 +1247,16 @@ if uploaded_file:
                 st.error(backend_error)
             else:
                 with st.spinner("補正中..."):
+                    bar = st.progress(0.0, text="補正中...")
                     st.session_state.corrected = correct_with_llm(
-                        text_for_correction, llm_backend, api_key, local_model_path, medical_terms
+                        text_for_correction,
+                        llm_backend,
+                        api_key,
+                        local_model_path,
+                        medical_terms,
+                        progress=lambda i, n: bar.progress(i / n, text=f"補正中...({i}/{n} ブロック完了)"),
                     )
+                    bar.empty()
                     st.session_state.correction_base = text_for_correction
                     # 新しい補正結果では採用・却下のチェックをやり直す
                     st.session_state.correction_run = st.session_state.get("correction_run", 0) + 1
