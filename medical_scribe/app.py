@@ -344,6 +344,7 @@ def infer_speakers_from_text(segments, backend: str, api_key: str, local_model_p
 
 SPEAKER_CHUNK = 40  # 話者推定で一度にLLMへ渡す文の数
 CHUNK_CHARS = 1200  # ③④⑤で一度にLLMへ渡す文字数の目安
+MAX_CANDIDATE_TERMS = 300  # ③の指示文に載せる用語リストの上限(長すぎると遅くなるため)
 MAX_CORRECTION_LEN = 15  # ③で1件として受け付ける「元の表記」の最大文字数(語句単位に限る)
 CORRECTION_CHUNK_CHARS = 2500  # ③(修正箇所の一覧だけを出力させる)で一度に渡す文字数
 
@@ -418,7 +419,9 @@ def split_into_chunks(text: str, max_chars: int = CHUNK_CHARS) -> list:
     return chunks
 
 
-def correct_with_llm(raw_text, backend, api_key, local_model_path, medical_terms="", progress=None):
+def correct_with_llm(
+    raw_text, backend, api_key, local_model_path, medical_terms="", progress=None, candidate_terms=()
+):
     """長い会話は分割して補正し、つなぎ直す。progress(i, n) で進み具合を知らせる。"""
     # 出力は修正箇所の一覧だけで短いので、③は大きめの単位で分けて呼び出し回数を減らす
     chunks = split_into_chunks(raw_text, max_chars=CORRECTION_CHUNK_CHARS)
@@ -426,14 +429,14 @@ def correct_with_llm(raw_text, backend, api_key, local_model_path, medical_terms
     for i, c in enumerate(chunks):
         if progress:
             progress(i, len(chunks))
-        out.append(correct_chunk_with_llm(c, backend, api_key, local_model_path, medical_terms))
+        out.append(correct_chunk_with_llm(c, backend, api_key, local_model_path, medical_terms, candidate_terms))
     if progress:
         progress(len(chunks), len(chunks))
     return "\n".join(out)
 
 
 def correct_chunk_with_llm(
-    raw_text: str, backend: str, api_key: str, local_model_path: str, medical_terms: str = ""
+    raw_text: str, backend: str, api_key: str, local_model_path: str, medical_terms: str = "", candidate_terms=()
 ) -> str:
     """誤変換の箇所だけを「誤 → 正」の形でLLMに答えさせ、プログラム側で本文に当てはめる。
     全文を書き直させる方式より出力が短いので、ローカルLLMでも数倍速い。
@@ -450,6 +453,18 @@ def correct_chunk_with_llm(
 この会話には、次のような用語が出てくる可能性があります(医師が事前に指定したもの):
 {medical_terms}
 
+誤変換は、次の医学用語のどれかが別の字や似た音の語になっていることが多いです(修正後の候補):
+{"、".join(list(candidate_terms)[:MAX_CANDIDATE_TERMS])}
+
+【例】
+文字起こし:
+患者：咳が出て、竹が絡みます
+医師：胸の音を聞きますね、指定ラ音があります。善則の既往はありますか
+誤変換の一覧:
+竹 → 痰
+指定ラ音 → 湿性ラ音
+善則 → 喘息
+
 答え方:
 - 見つけた誤変換を1行に1つ、「元の表記 → 修正後の表記」の形で書いてください。
 - 元の表記は、テキスト中の文字をそのまま(一字一句同じに)書き写してください。
@@ -464,12 +479,16 @@ def correct_chunk_with_llm(
 【誤変換の一覧】
 """
     output = run_llm(prompt, backend, api_key, local_model_path)
-    return apply_llm_corrections(raw_text, output)
+    return apply_llm_corrections(raw_text, output, frozenset(candidate_terms))
 
 
-def apply_llm_corrections(text: str, llm_output: str) -> str:
+def apply_llm_corrections(text: str, llm_output: str, protected_terms=frozenset()) -> str:
     """LLMが挙げた「誤 → 正」のうち、本文に実在する語の置き換えだけを適用する。
-    話者ラベルや改行には触れない。修正後が空(削除)の提案は適用しない。"""
+    話者ラベルや改行には触れない。次の提案は誤変換の修正ではないので適用しない:
+    - 修正後が空(削除)
+    - 元の語をそのまま含む書き足し(例:「甲状腺」→「甲状腺の薬」)や、その逆の削り
+    - 元の語が用語リストにある正しい医学用語(例:「甲状腺」を別の語にする)
+    書き足しを本文中の同じ語すべてに当てはめると、会話全体が壊れるため。"""
     for line in llm_output.splitlines():
         line = re.sub(r"^\s*(?:[-・*]|\d+[.)、])\s*", "", line).strip()
         parts = re.split(r"\s*(?:→|->|=>|⇒)\s*", line, maxsplit=1)
@@ -482,6 +501,10 @@ def apply_llm_corrections(text: str, llm_output: str) -> str:
             continue  # 話者ラベルは書き換えさせない
         if is_punctuation_only(wrong, right) or len(wrong) > MAX_CORRECTION_LEN:
             continue  # 句読点だけの修正や、文ごとの書き直しは誤変換の修正ではないので使わない
+        if wrong in right or right in wrong:
+            continue  # 書き足し・削りは誤変換の修正ではない
+        if wrong in protected_terms:
+            continue  # 正しい医学用語は書き換えない
         text = text.replace(wrong, right)
     return text
 
@@ -826,6 +849,8 @@ def build_sound_index(terms: tuple):
     return entries, index
 
 
+PARTICLE_MID = re.compile(r"[^\u3040-\u309f][はがをにのでともへや][^\u3040-\u309f]")
+HIRAGANA_ANY = re.compile(r"[\u3040-\u309f]")
 PARTICLE_END = re.compile(r"[はがをにのでともへや]$")
 HIRAGANA_END = re.compile(r"[\u3040-\u309f]$")
 HIRAGANA_ONLY = re.compile(r"^[\u3040-\u309fー、。,.？！?!\s]*$")
@@ -851,8 +876,10 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
             reading += toks[j][1]
             # 前後のひらがなを除いた中心部分(「なる症状」→「症状」)も、用語・除外語なら対象外
             core = re.sub(r"^[\u3040-\u309f]+|[\u3040-\u309f]+$", "", surface)
-            if len(reading) < 3 or HIRAGANA_ONLY.match(surface) or surface in term_set or core in term_set:
+            if len(reading) < 3 or len(surface) < 2 or HIRAGANA_ONLY.match(surface) or surface in term_set or core in term_set:
                 continue
+            if re.search(r"[：:、。？！?!\s]", surface):
+                continue  # 話者ラベルや句読点をまたぐ区切りは対象外
             cands = set()
             for k in range(len(reading) - 1):
                 cands |= index.get(reading[k : k + 2], set())
@@ -862,6 +889,9 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
                     continue
                 # 「脈は」→「脈拍」のように、助詞で終わる区切りを漢字で終わる用語と取り違えない
                 if PARTICLE_END.search(surface) and not HIRAGANA_END.search(term):
+                    continue
+                # 「甲状腺にホルモン」→「甲状腺ホルモン」のように、助詞をはさんだ2語を1語にしない
+                if PARTICLE_MID.search(surface) and not HIRAGANA_ANY.search(term):
                     continue
                 ratio = difflib.SequenceMatcher(None, reading, term_reading).ratio()
                 # 短い語は読みが完全一致する場合のみ(偶然の一致を避ける)
@@ -873,8 +903,11 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
     chosen, used = [], set()
     for f in found:
         span = set(range(f[0], f[1]))
-        if not span & used:
-            chosen.append(f)
+        # 同じ箇所で同じくらい近い候補が複数あるとき(発見→発汗/発疹)は両方出して医師に選ばせる
+        tie = any(c[0] == f[0] and c[1] == f[1] and c[4] == f[4] and c[3] != f[3] for c in chosen)
+        if not span & used or tie:
+            if not any(c[0] == f[0] and c[1] == f[1] and c[3] == f[3] for c in chosen):
+                chosen.append(f)
             used |= span
     return sorted(chosen)
 
@@ -882,7 +915,7 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
 def apply_sound_replacements(text: str, matches: list, accepted_pairs: set) -> str:
     out, last = [], 0
     for start, end, surface, term, _ in matches:
-        if (surface, term) in accepted_pairs:
+        if (surface, term) in accepted_pairs and start >= last:  # 同じ箇所の別候補は先に採用した方だけ
             out.append(text[last:start])
             out.append(term)
             last = end
@@ -1282,6 +1315,7 @@ if uploaded_file:
                         local_model_path,
                         medical_terms,
                         progress=lambda i, n: bar.progress(i / n, text=f"補正中...({i}/{n} ブロック完了)"),
+                        candidate_terms=sound_terms,
                     )
                     bar.empty()
                     st.session_state.correction_base = text_for_correction
