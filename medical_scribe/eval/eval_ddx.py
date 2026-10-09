@@ -13,6 +13,7 @@ NEJM形式の症例データ(JSON: [{"病歴": ..., "最終診断": ..., "鑑別
       --models swallow-8b-nejm swallow-8b --n 20 --out result.csv
 
   --train を指定すると、学習データと同じ病歴の症例を評価から除外します。
+  学習に使っていない短い症例として test_cases_20.json(20症例)を同梱しています。
   途中で止めても、同じ --out で再実行すれば終わった症例は飛ばして続きから実行します。
 """
 
@@ -43,7 +44,7 @@ def load_cases(path: str) -> list:
     return cases
 
 
-def ask_ollama(model: str, history: str, timeout: int = 600) -> str:
+def ask_ollama(model: str, history: str, timeout: int = 900, num_ctx: int = 8192) -> str:
     payload = {
         "model": model,
         "messages": [
@@ -51,7 +52,7 @@ def ask_ollama(model: str, history: str, timeout: int = 600) -> str:
             {"role": "user", "content": f"'病歴': {history}"},  # 学習データと同じ形式
         ],
         "stream": False,
-        "options": {"temperature": 0, "num_ctx": 8192, "num_predict": 1536},
+        "options": {"temperature": 0, "num_ctx": num_ctx, "num_predict": 1536},
     }
     req = urllib.request.Request(
         OLLAMA_URL, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}
@@ -101,6 +102,7 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=20, help="評価する症例数")
     ap.add_argument("--seed", type=int, default=0, help="症例の選び方(同じ値なら同じ症例)")
     ap.add_argument("--max-chars", type=int, default=3000, help="これより長い病歴は除外(16GBのMacで遅くなりすぎないように)")
+    ap.add_argument("--num-ctx", type=int, default=8192, help="長い症例(NEJMの症例記録など)を使うときは16384などに増やす")
     ap.add_argument("--out", default="eval_result.csv")
     args = ap.parse_args()
 
@@ -132,7 +134,7 @@ def main() -> None:
                 print(f"[{model}] {k}/{len(selected)} 症例{case['case_id']} …", end="", flush=True)
                 start = time.time()
                 try:
-                    output = ask_ollama(model, case["病歴"])
+                    output = ask_ollama(model, case["病歴"], num_ctx=args.num_ctx)
                 except Exception as e:  # 1件の失敗で全体を止めない
                     output = f"(エラー: {e})"
                 final = extract_final(output)
