@@ -39,8 +39,17 @@ def load_cases(path: str) -> list:
         data = next((v for v in data.values() if isinstance(v, list)), [])
     cases = []
     for i, row in enumerate(data):
-        if isinstance(row, dict) and row.get("病歴") and row.get("最終診断"):
+        if not isinstance(row, dict):
+            continue
+        if row.get("病歴") and row.get("最終診断"):
             cases.append({"case_id": i, "病歴": row["病歴"].strip(), "最終診断": row["最終診断"].strip()})
+        elif isinstance(row.get("messages"), list):
+            # 学習用の会話形式({"messages": [system, user, assistant]})にも対応する
+            msgs = {m.get("role"): m.get("content", "") for m in row["messages"] if isinstance(m, dict)}
+            history = re.sub(r"^\s*'?病歴'?\s*[:：]\s*", "", msgs.get("user", "")).strip()
+            gold = re.search(r"'?最終診断'?\s*[:：]\s*(.+)", msgs.get("assistant", ""))
+            if history and gold:
+                cases.append({"case_id": i, "病歴": history, "最終診断": gold.group(1).strip()})
     return cases
 
 
