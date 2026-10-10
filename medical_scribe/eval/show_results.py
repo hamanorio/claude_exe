@@ -9,6 +9,15 @@ import argparse
 import csv
 from collections import OrderedDict
 
+from eval_ddx import extract_final, is_match
+
+
+def rescore(rows: list) -> None:
+    """保存済みの出力全文から、最終診断の抜き出しと一致判定をやり直す(モデルの再実行は不要)。"""
+    for r in rows:
+        r["predicted_final"] = extract_final(r["output"])
+        r["final_match"] = "○" if is_match(r["gold"], r["predicted_final"]) else "要目視"
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -18,6 +27,7 @@ def main() -> None:
 
     with open(args.csv_path, encoding="utf-8-sig") as fh:
         rows = list(csv.DictReader(fh))
+    rescore(rows)
     models = list(OrderedDict.fromkeys(r["model"] for r in rows))
 
     if args.case is not None:

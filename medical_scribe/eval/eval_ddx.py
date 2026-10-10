@@ -78,20 +78,41 @@ def normalize(text: str) -> str:
     return text.lower()
 
 
+def _clean(line: str) -> str:
+    """行頭の見出し記号・番号(## 3. / **/ - / 【)と、行末の記号を取り除く。"""
+    line = re.sub(r"^[\s#*'\"\-・>【\[]*(?:[0-9０-９]+[.．)）]\s*)?[\s*'\"【]*", "", line)
+    return re.sub(r"[\s*'\"】\]：:。、]+$", "", line)
+
+
+def _pick(text: str) -> str:
+    """太字(**X**)があればその中身を、なければ文をそのまま返す。"""
+    bold = re.search(r"\*\*([^*]+?)\*\*", text)
+    picked = bold.group(1) if bold else text
+    picked = re.sub(r"(が|は)?(最も)?(可能性の高い|考えられる)診断.*$", "", picked)
+    return _clean(picked)
+
+
 def extract_final(output: str) -> str:
-    """出力から最終診断の部分を取り出す。'最終診断': X / **最終診断:** X / 見出しの次の行 に対応。"""
-    m = re.search(r"最終診断[^\n:：]*[:：]?\s*(.*)", output)
-    if not m:
+    """出力から最終診断を取り出す。
+
+    本文中の「…最終診断を考えます」のような言及ではなく、行頭が「最終診断」で始まる
+    見出し(## 最終診断 / **最終診断:** / '最終診断': X / 3. 最終診断)のうち最後のものを使う。
+    見出しの後ろが「以下の診断が考えられます」のような前置きなら、次の行を診断とみなす。
+    """
+    lines = output.splitlines()
+    heads = [i for i, ln in enumerate(lines) if _clean(ln).startswith("最終診断")]
+    if not heads:
         return ""
-    rest = m.group(1).strip(" *'\"")
-    if rest:
-        return rest.splitlines()[0].strip(" *'\"")
-    after = output[m.end():].strip().splitlines()
-    for line in after:
-        line = line.strip(" *'\"-・")
-        if line:
-            return line
-    return ""
+    i = heads[-1]
+    rest = re.sub(r"^最終診断[^:：]*[:：]?[\s*'\"】]*", "", _clean(lines[i]), count=1).strip()
+    candidates = [rest] if rest else []
+    candidates += [ln for ln in lines[i + 1 :] if _clean(ln)]
+    for cand in candidates[:4]:
+        cand = cand.strip()
+        if re.search(r"(以下|次の)[^。]*(考えられ|挙げ|示し|まとめ)|[:：]\s*$", cand) and "**" not in cand:
+            continue  # 前置きの文は飛ばす
+        return _pick(cand)
+    return _pick(candidates[0]) if candidates else ""
 
 
 def is_match(gold: str, predicted: str) -> bool:
