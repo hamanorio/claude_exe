@@ -124,6 +124,21 @@ def unload_ollama(model_name: str) -> None:
         pass  # Ollamaが起動していない等。文字起こし自体には影響しない
 
 
+def unload_all_ollama() -> list:
+    """Ollamaに読み込まれているモデルをすべてメモリから外し、外したモデル名を返す。
+    ⑧の診断支援モデルや、評価スクリプトで使ったモデルが残っていると、
+    16GBのMacでは文字起こしがメモリ不足で大幅に遅くなるため。
+    """
+    try:
+        with urllib.request.urlopen(OLLAMA_URL.replace("/api/chat", "/api/ps"), timeout=5) as res:
+            loaded = [m.get("name") or m.get("model") for m in json.loads(res.read().decode("utf-8")).get("models", [])]
+    except Exception:
+        return []  # Ollamaが起動していない等
+    for name in loaded:
+        unload_ollama(name)
+    return loaded
+
+
 OLLAMA_MAX_TOKENS = 2048  # 1回の生成の上限。ローカルLLMが同じ文を繰り返し続けて終わらないのを防ぐ
 
 
@@ -1211,8 +1226,7 @@ if uploaded_file:
         st.session_state.play_start = 0
 
     if st.button("① 文字起こしを実行", type="primary"):
-        if llm_backend == "ローカル(Ollama・Mac向け)" and local_model_path:
-            unload_ollama(local_model_path)
+        unload_all_ollama()
         with st.spinner(f"{whisper_engine}で文字起こし中...(初回はモデルのダウンロードに時間がかかります)"):
             st.session_state.result = transcribe(audio_path, medical_terms, model_size, whisper_engine)
         if whisper_engine == "kotoba-whisper(日本語特化)":
