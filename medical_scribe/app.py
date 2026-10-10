@@ -124,19 +124,22 @@ def unload_ollama(model_name: str) -> None:
         pass  # Ollamaが起動していない等。文字起こし自体には影響しない
 
 
-def unload_all_ollama() -> list:
+def unload_all_ollama(keep: str = "") -> list:
     """Ollamaに読み込まれているモデルをすべてメモリから外し、外したモデル名を返す。
     ⑧の診断支援モデルや、評価スクリプトで使ったモデルが残っていると、
     16GBのMacでは文字起こしがメモリ不足で大幅に遅くなるため。
+    keep に指定したモデルは外さない(これから使うモデルを読み込み直さずに済むように)。
     """
     try:
         with urllib.request.urlopen(OLLAMA_URL.replace("/api/chat", "/api/ps"), timeout=5) as res:
             loaded = [m.get("name") or m.get("model") for m in json.loads(res.read().decode("utf-8")).get("models", [])]
     except Exception:
         return []  # Ollamaが起動していない等
-    for name in loaded:
+    keep_names = {keep, f"{keep}:latest"} if keep else set()
+    unloaded = [name for name in loaded if name not in keep_names]
+    for name in unloaded:
         unload_ollama(name)
-    return loaded
+    return unloaded
 
 
 OLLAMA_MAX_TOKENS = 2048  # 1回の生成の上限。ローカルLLMが同じ文を繰り返し続けて終わらないのを防ぐ
@@ -175,10 +178,23 @@ def generate_with_ollama(
             if not line.strip():
                 continue
             msg = json.loads(line.decode("utf-8"))
-            parts.append(msg.get("message", {}).get("content", ""))
+            piece = msg.get("message", {}).get("content", "")
+            parts.append(piece)
             if msg.get("done"):
                 break
+            # JSONモードでは、JSONを閉じた後も空白を上限まで出し続けることがあるため、
+            # JSONとして完成した時点で受け取りを打ち切る(接続を閉じるとOllama側の生成も止まる)
+            if json_mode and "}" in piece and is_complete_json("".join(parts)):
+                break
     return "".join(parts).strip()
+
+
+def is_complete_json(text: str) -> bool:
+    try:
+        json.loads(text)
+        return True
+    except json.JSONDecodeError:
+        return False
 
 
 def extract_json_block(text: str) -> dict:
@@ -720,15 +736,20 @@ def is_paraphrased(item: str, text: str) -> bool:
     return bool(bigrams) and not any(b in text for b in bigrams)
 
 
-def extract_structured_findings(text: str, backend: str, api_key: str, local_model_path: str) -> list:
-    """長い会話は分割して抽出し、同じ項目名の重複を除いてまとめる。"""
+def extract_structured_findings(text: str, backend: str, api_key: str, local_model_path: str, progress=None) -> list:
+    """長い会話は分割して抽出し、同じ項目名の重複を除いてまとめる。progress(i, n) で進み具合を知らせる。"""
     merged, seen = [], set()
-    for c in split_into_chunks(text):
+    chunks = split_into_chunks(text)
+    for i, c in enumerate(chunks):
+        if progress:
+            progress(i, len(chunks))
         for f in extract_findings_chunk(c, backend, api_key, local_model_path):
             key = re.sub(r"\s", "", str(f.get("item", "")))
             if key and key not in seen:
                 seen.add(key)
                 merged.append(f)
+    if progress:
+        progress(len(chunks), len(chunks))
     return merged
 
 
@@ -1529,13 +1550,19 @@ if uploaded_file:
                 if not backend_ready:
                     st.error(backend_error)
                 else:
-                    with st.spinner("抽出中..."):
-                        st.session_state.findings = extract_structured_findings(
-                            reviewed_text, llm_backend, api_key, local_model_path
-                        )
-                        st.session_state.findings_source = reviewed_text
-                        # 抽出し直したら、前回の入力・チェック状態を引き継がない
-                        st.session_state.findings_run = st.session_state.get("findings_run", 0) + 1
+                    if llm_backend == "ローカル(Ollama・Mac向け)":
+                        unload_all_ollama(keep=local_model_path)  # ⑧のモデル等が残っているとメモリ不足で遅くなる
+                    bar = st.progress(0.0, text="抽出中...")
+                    st.session_state.findings = extract_structured_findings(
+                        reviewed_text,
+                        llm_backend,
+                        api_key,
+                        local_model_path,
+                        progress=lambda i, n: bar.progress(i / n, text=f"抽出中...({i}/{n} ブロック完了)"),
+                    )
+                    st.session_state.findings_source = reviewed_text
+                    # 抽出し直したら、前回の入力・チェック状態を引き継がない
+                    st.session_state.findings_run = st.session_state.get("findings_run", 0) + 1
 
             if "findings" in st.session_state:
                 if not st.session_state.findings:
