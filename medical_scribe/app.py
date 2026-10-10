@@ -15,6 +15,8 @@
    自由文に埋め込まず、医師が個別に確認・選択する形で表示
 8. ②③④⑤のLLM処理をOpenAI APIの代わりにローカルのSwallowモデルで実行する選択肢
    (実在患者データを扱う際の越境移転の問題を避けるため)
+9. 確認済みの所見から、NEJM症例でファインチューニングしたモデル(Ollama)で鑑別診断の参考を出す
+   (最終判断は医師。出力に病歴に無い数値・検査名があれば⚠で示す)
 
 使い方(Google Colab):
     !pip install streamlit openai-whisper openai pyannote.audio transformers accelerate
@@ -125,20 +127,24 @@ def unload_ollama(model_name: str) -> None:
 OLLAMA_MAX_TOKENS = 2048  # 1回の生成の上限。ローカルLLMが同じ文を繰り返し続けて終わらないのを防ぐ
 
 
-def generate_with_ollama(prompt: str, model_name: str, json_mode: bool = False) -> str:
+def generate_with_ollama(
+    prompt: str, model_name: str, json_mode: bool = False, system: str = "", max_tokens: int = OLLAMA_MAX_TOKENS
+) -> str:
     """Mac上のOllama(量子化済みSwallow)で生成する。データはMacの外に出ない。
     生成結果を少しずつ受け取る(ストリーミング)ので、全体に時間がかかっても途中で
     タイムアウトしない(タイムアウトは「300秒間なにも返ってこない」場合だけ)。
     """
+    messages = [{"role": "system", "content": system}] if system else []
+    messages.append({"role": "user", "content": prompt})
     payload = {
         "model": model_name,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "stream": True,
         "options": {
             "temperature": 0,
             "repeat_penalty": 1.15,
             "num_ctx": 8192,
-            "num_predict": OLLAMA_MAX_TOKENS,
+            "num_predict": max_tokens,
         },
     }
     if json_mode:
@@ -1006,6 +1012,90 @@ def build_chart_draft(findings: list) -> str:
     return "\n".join(out)
 
 
+# ---- ⑧ 鑑別診断の参考(NEJM症例でファインチューニングしたモデル) ----
+
+# 学習データと同じシステムプロンプト・入力形式にする(変えると学習の効果が出にくくなる)
+DDX_SYSTEM_PROMPT = "あなたは医師を支援する医療AIです。病歴を読み、鑑別診断を挙げ、検証的推論を行い最終診断を考えてください。"
+DDX_SECTIONS = ["問題表現", "鑑別診断", "検証的推論", "最終診断"]
+
+
+def build_history_text(findings: list, patient_info: str) -> str:
+    """医師が確認した所見だけから、モデルに渡す病歴文を組み立てる(会話の全文は渡さない)。"""
+
+    def phrase(f):
+        lat = f["laterality"]
+        lat_txt = "" if lat in ("なし(左右関係なし)", "不明") else f"({lat})"
+        return f"{f['item']}{lat_txt}: {f['value']}"
+
+    s_items = [phrase(f) for f in findings if f["section"] == SOAP_SECTIONS[0]]
+    o_items = [phrase(f) for f in findings if f["section"] == SOAP_SECTIONS[1]]
+    parts = [patient_info.strip().rstrip("。")] if patient_info.strip() else []
+    if s_items:
+        parts.append("訴え・病歴: " + "、".join(s_items))
+    if o_items:
+        parts.append("診察・検査所見: " + "、".join(o_items))
+    return "。".join(parts) + "。" if parts else ""
+
+
+def _heading_of(line: str) -> str:
+    """行が「## 鑑別診断」「**最終診断:**」「'検証的推論':」のような見出しなら、その名前を返す。"""
+    head = re.sub(r"^[\s#*'\"\-・>【\[]*(?:[0-9０-９]+[.．)）]\s*)?[\s*'\"【]*", "", line)
+    for name in DDX_SECTIONS:
+        if head.startswith(name) and re.match(rf"{name}[^。、]{{0,12}}?([\s*'\"】:：]|$)", head):
+            return name
+    return ""
+
+
+def parse_ddx_output(output: str) -> dict:
+    """モデルの出力を、問題表現・鑑別診断・検証的推論・最終診断の各部分に分ける。
+    見出しが見つからない部分は空文字にする(UIでは出力全文を見られるようにする)。
+    """
+    sections = {name: [] for name in DDX_SECTIONS}
+    current = None
+    for line in output.splitlines():
+        name = _heading_of(line)
+        if name:
+            current = name
+            sections[current] = []  # 同じ見出しが2回出たら後の方を使う(前置きの「最終診断を考えるための病歴:」等を避ける)
+            rest = re.sub(rf"^.*?{name}[^:：]{{0,12}}[:：]?[\s*'\"】]*", "", line, count=1).strip(" *'\"")
+            if rest:
+                sections[current].append(rest)
+        elif current:
+            sections[current].append(line)
+    return {name: "\n".join(lines).strip() for name, lines in sections.items()}
+
+
+def find_unsupported_terms(output: str, history: str) -> list:
+    """出力に出てくる数値・英字の検査名などのうち、渡した病歴に無いものを返す。
+    モデルが病歴に無い検査値や所見を「根拠」として作り出していないかを医師が確認するため。
+    (追加検査の提案として挙げている場合もあるので、誤りとは限らない)
+    """
+    hist = history.replace(" ", "").lower()
+    tokens = re.findall(r"[0-9０-９]+(?:[.．][0-9０-９]+)?\s*(?:%|％|mg/dL|g/dL|mmHg|/分|℃|mEq/L|U/L|IU/mL|ng/dL|pg/mL|μg/dL)?|[A-Za-z][A-Za-z0-9\-]{1,}", output)
+    found = []
+    for t in tokens:
+        t = t.strip()
+        key = t.replace(" ", "").lower()
+        if len(key) < 2 and not key.isdigit():
+            continue
+        if re.fullmatch(r"[0-9０-９]", key):
+            continue  # 箇条書きの番号などの1桁の数字は対象にしない
+        if key not in hist and t not in found:
+            found.append(t)
+    return found
+
+
+def findings_not_mentioned(findings: list, output: str) -> list:
+    """確認済みの所見のうち、モデルの出力で触れられていないもの(見落とされた可能性)を返す。"""
+    missed = []
+    for f in findings:
+        word = re.sub(r"[\s(（].*$", "", f["item"])
+        bigrams = {word[i : i + 2] for i in range(max(1, len(word) - 1))}
+        if bigrams and sum(b in output for b in bigrams) < max(1, len(bigrams) // 2):
+            missed.append(f["item"])
+    return missed
+
+
 # ---------------- UI ----------------
 
 st.title("🩺 診察音声 → カルテ下書き プロトタイプ")
@@ -1099,6 +1189,12 @@ with st.sidebar:
             help="ファインチューニング前のベースInstructモデルを推奨(汎用的な補正・抽出タスクのため)。",
         )
         st.caption("⚠️ 初回実行時はモデルのダウンロード・読み込みに時間がかかります。GPUのメモリ使用量にも注意してください。")
+    ddx_model = st.text_input(
+        "⑧ 鑑別診断の参考に使うモデル(Ollama)",
+        "swallow-8b-nejm",
+        help="NEJMの症例でファインチューニングしたモデルの、`ollama list` で表示される名前。"
+        "患者データを外に出さないため、⑧はMac上のOllamaでだけ動かします。",
+    )
     st.divider()
     enable_diarization = st.checkbox("話者分離を行う(医師/患者の区別)")
     hf_token = st.text_input("Hugging Face トークン(話者分離用)", type="password") if enable_diarization else None
@@ -1504,6 +1600,9 @@ if uploaded_file:
                     if not st.session_state.get(f"finding_ex_{fr}_{i}", False)
                 ]
                 st.session_state.chart_draft = build_chart_draft(confirmed_findings)
+                st.session_state.confirmed_findings = confirmed_findings
+                st.session_state.pop("ddx_output", None)
+                st.session_state.pop("ddx_history_box", None)
 
             if "chart_draft" in st.session_state:
                 st.divider()
@@ -1520,5 +1619,83 @@ if uploaded_file:
                     file_name="karte_draft.txt",
                     mime="text/plain",
                 )
+
+                st.divider()
+                st.subheader("⑧ 鑑別診断の参考")
+                st.warning(
+                    "これは診断ではなく、見落としを防ぐための参考情報です。8Bの小型モデルのため、"
+                    "典型的な疾患以外はほとんど当たらず、説明文には医学的な誤りが混じります。"
+                    "【A】(評価)は必ず医師ご自身の判断で記入してください(ここから自動では入りません)。"
+                )
+                confirmed_findings = st.session_state.get("confirmed_findings", [])
+                patient_info = st.text_input(
+                    "年齢・性別・既往など(任意。会話から抽出していない情報を足せます)",
+                    placeholder="例: 34歳女性。既往歴なし",
+                    key="ddx_patient_info",
+                )
+                history = st.text_area(
+                    "モデルに渡す病歴(⑤で確認した所見から作成。送る前に編集できます)",
+                    build_history_text(confirmed_findings, patient_info),
+                    height=150,
+                    help="会話の全文ではなく、医師が確認した所見だけを渡します。",
+                )
+                if st.button("鑑別診断の参考を出す"):
+                    if not history.strip():
+                        st.error("病歴が空です。⑤で所見を確認するか、上の欄に入力してください。")
+                    else:
+                        # 16GBのMacで②〜⑤のモデルと同時に載らないよう、先に外しておく
+                        if llm_backend == "ローカル(Ollama・Mac向け)" and local_model_path and local_model_path != ddx_model:
+                            unload_ollama(local_model_path)
+                        with st.spinner(f"{ddx_model}で考えています...(数分かかることがあります)"):
+                            try:
+                                st.session_state.ddx_output = generate_with_ollama(
+                                    f"'病歴': {history}", ddx_model, system=DDX_SYSTEM_PROMPT, max_tokens=1536
+                                )
+                                st.session_state.ddx_history = history
+                            except Exception as e:
+                                st.error(
+                                    f"{ddx_model}を呼び出せませんでした({e})。Ollamaが起動しているか、"
+                                    "サイドバーのモデル名が `ollama list` の表示と同じか確認してください。"
+                                )
+
+                if "ddx_output" in st.session_state:
+                    output = st.session_state.ddx_output
+                    used_history = st.session_state.get("ddx_history", "")
+                    parts = parse_ddx_output(output)
+                    if used_history != history:
+                        st.caption("⚠️ 病歴の欄が、この結果を出したときから変わっています。もう一度ボタンを押してください。")
+                    if parts["最終診断"]:
+                        st.markdown("**最も可能性が高いとモデルが考えた診断(参考)**")
+                        st.info(parts["最終診断"])
+                    if parts["鑑別診断"]:
+                        st.markdown("**鑑別診断の候補(参考)**")
+                        st.markdown(parts["鑑別診断"])
+                    if not parts["最終診断"] and not parts["鑑別診断"]:
+                        st.caption("出力から鑑別診断・最終診断の見出しを読み取れませんでした。下の全文を見てください。")
+
+                    unsupported = find_unsupported_terms(output, used_history)
+                    if unsupported:
+                        st.markdown(
+                            ":orange[⚠ 病歴に無い数値・検査名]: "
+                            + "、".join(md_escape(t) for t in unsupported[:30])
+                        )
+                        st.caption(
+                            "モデルが根拠として作り出した値か、追加検査の提案として挙げたものです。"
+                            "根拠として使われていないか、推論の文を確認してください。"
+                        )
+                    missed = findings_not_mentioned(confirmed_findings, output)
+                    if missed:
+                        st.markdown(":orange[⚠ 出力で触れられていない確認済み所見]: " + "、".join(md_escape(m) for m in missed))
+                        st.caption("これらの所見を考慮していない可能性があります。")
+
+                    with st.expander("推論の説明(誤りが混じるので注意して読んでください)"):
+                        if parts["問題表現"]:
+                            st.markdown("**問題表現**")
+                            st.markdown(parts["問題表現"])
+                        if parts["検証的推論"]:
+                            st.markdown("**検証的推論**")
+                            st.markdown(parts["検証的推論"])
+                    with st.expander("モデルの出力全文"):
+                        st.text(output)
 else:
     st.info("まずは音声ファイル(mp3/wav/m4a)をアップロードしてください。")
