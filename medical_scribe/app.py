@@ -295,6 +295,17 @@ def transcribe_kotoba(audio_path: str, model_id: str) -> dict:
     return {"text": "".join(seg["text"] for seg in segments), "segments": segments}
 
 
+@st.cache_resource
+def mlx_worker():
+    """mlx-whisper専用のスレッド(1本)。MLXは処理するスレッドが変わると
+    「There is no Stream(cpu, 0) in current thread」で止まるが、Streamlitは画面を更新するたびに
+    別のスレッドでスクリプトを動かすため、文字起こしは常にこの同じスレッドで行う。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-whisper")
+
+
 def transcribe(audio_path: str, medical_terms: str, model_size: str, engine: str = "openai-whisper"):
     initial_prompt = f"これは医師と患者の診察会話です。次のような医学用語が含まれます: {medical_terms}"
     if engine == "kotoba-whisper(日本語特化)":
@@ -303,13 +314,14 @@ def transcribe(audio_path: str, medical_terms: str, model_size: str, engine: str
         # Apple SiliconのGPUで動く。出力形式(segments/avg_logprob等)はopenai-whisperと同じ
         import mlx_whisper
 
-        return mlx_whisper.transcribe(
+        return mlx_worker().submit(
+            mlx_whisper.transcribe,
             audio_path,
             path_or_hf_repo=MLX_WHISPER_REPOS[model_size],
             language="ja",
             initial_prompt=initial_prompt,
             condition_on_previous_text=False,
-        )
+        ).result()
     model = load_whisper_model(model_size)
     result = model.transcribe(
         audio_path,
