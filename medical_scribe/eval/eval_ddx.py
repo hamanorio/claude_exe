@@ -15,6 +15,9 @@ NEJM形式の症例データ(JSON: [{"病歴": ..., "最終診断": ..., "鑑別
   OpenAIのモデルと比べるときは、モデル名の頭に openai: を付けます(APIキーは環境変数 OPENAI_API_KEY)。
     export OPENAI_API_KEY=sk-...
     python3 eval_ddx.py --data 症例.json --models openai:gpt-5.6-sol swallow-8b-nejm --n 13 --out result.csv
+  考える型のモデル(Qwen3, GPT-OSS)は、考える分も出力の上限に含まれるので上限を増やします。
+    python3 eval_ddx.py --data 症例.json --models qwen3:14b --num-predict 8192 --num-ctx 16384 --out result.csv
+    python3 eval_ddx.py --data 症例.json --models gpt-oss:20b --think low --num-predict 8192 --num-ctx 16384 --out result.csv
   ※ openai: のモデルには症例の文章が OpenAI(米国)に送られます。公開された症例や架空の症例だけに使い、
     実在の患者さんの情報は送らないでください。
 
@@ -88,13 +91,23 @@ def ask_openai(model: str, history: str, timeout: int = 900) -> str:
     return (data["choices"][0]["message"].get("content") or "").strip()
 
 
-def ask_model(model: str, history: str, num_ctx: int) -> str:
+def ask_model(model: str, history: str, args) -> str:
     if model.startswith("openai:"):
         return ask_openai(model[len("openai:") :], history)
-    return ask_ollama(model, history, num_ctx=num_ctx)
+    return ask_ollama(model, history, num_ctx=args.num_ctx, num_predict=args.num_predict, think=args.think)
 
 
-def ask_ollama(model: str, history: str, timeout: int = 900, num_ctx: int = 8192) -> str:
+def strip_thinking(text: str) -> str:
+    """考える型のモデル(Qwen3など)が出力に混ぜる <think>…</think> を取り除き、答えの部分だけにする。"""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    if "<think>" in text:  # 考えている途中で出力の上限に達した
+        text = text.split("<think>")[0]
+    return text.strip()
+
+
+def ask_ollama(
+    model: str, history: str, timeout: int = 3600, num_ctx: int = 8192, num_predict: int = 1536, think: str = ""
+) -> str:
     payload = {
         "model": model,
         "messages": [
@@ -102,13 +115,22 @@ def ask_ollama(model: str, history: str, timeout: int = 900, num_ctx: int = 8192
             {"role": "user", "content": f"'病歴': {history}"},  # 学習データと同じ形式
         ],
         "stream": False,
-        "options": {"temperature": 0, "num_ctx": num_ctx, "num_predict": 1536},
+        "options": {"temperature": 0, "num_ctx": num_ctx, "num_predict": num_predict},
     }
+    if think:
+        # 考える型のモデルだけに指定する(対応していないモデルに送るとエラーになる)。
+        # Qwen3 は true/false、GPT-OSS は low/medium/high で考える量を指定する
+        payload["think"] = {"true": True, "false": False}.get(think, think)
     req = urllib.request.Request(
         OLLAMA_URL, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=timeout) as res:
-        return json.loads(res.read().decode("utf-8"))["message"]["content"].strip()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            message = json.loads(res.read().decode("utf-8"))["message"]
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}") from e
+    # 新しいOllamaでは、考えた過程は message["thinking"] に分かれて返るので content だけを使う
+    return strip_thinking(message.get("content", ""))
 
 
 def normalize(text: str) -> str:
@@ -174,6 +196,18 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0, help="症例の選び方(同じ値なら同じ症例)")
     ap.add_argument("--max-chars", type=int, default=3000, help="これより長い病歴は除外(16GBのMacで遅くなりすぎないように)")
     ap.add_argument("--num-ctx", type=int, default=8192, help="長い症例(NEJMの症例記録など)を使うときは16384などに増やす")
+    ap.add_argument(
+        "--num-predict",
+        type=int,
+        default=1536,
+        help="1回の出力の上限(トークン)。考える型のモデル(Qwen3, GPT-OSS)は考える分も含むので8192などに増やす",
+    )
+    ap.add_argument(
+        "--think",
+        default="",
+        choices=["", "true", "false", "low", "medium", "high"],
+        help="考える型のモデルの考える量。Qwen3は true/false、GPT-OSSは low/medium/high。指定しなければモデルの初期設定",
+    )
     ap.add_argument("--out", default="eval_result.csv")
     args = ap.parse_args()
 
@@ -209,7 +243,7 @@ def main() -> None:
                 print(f"[{model}] {k}/{len(selected)} 症例{case['case_id']} …", end="", flush=True)
                 start = time.time()
                 try:
-                    output = ask_model(model, case["病歴"], args.num_ctx)
+                    output = ask_model(model, case["病歴"], args)
                 except Exception as e:  # 1件の失敗で全体を止めない
                     output = f"(エラー: {e})"
                 final = extract_final(output)
