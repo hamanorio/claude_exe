@@ -12,6 +12,12 @@ NEJM形式の症例データ(JSON: [{"病歴": ..., "最終診断": ..., "鑑別
   python3 eval_ddx.py --data NEJM_dataset6.json --train 学習に使ったデータ.json \
       --models swallow-8b-nejm swallow-8b --n 20 --out result.csv
 
+  OpenAIのモデルと比べるときは、モデル名の頭に openai: を付けます(APIキーは環境変数 OPENAI_API_KEY)。
+    export OPENAI_API_KEY=sk-...
+    python3 eval_ddx.py --data 症例.json --models openai:gpt-5.6-sol swallow-8b-nejm --n 13 --out result.csv
+  ※ openai: のモデルには症例の文章が OpenAI(米国)に送られます。公開された症例や架空の症例だけに使い、
+    実在の患者さんの情報は送らないでください。
+
   --train を指定すると、学習データと同じ病歴の症例を評価から除外します。
   学習に使っていない短い症例として test_cases_20.json(20症例)を同梱しています。
   途中で止めても、同じ --out で再実行すれば終わった症例は飛ばして続きから実行します。
@@ -25,9 +31,11 @@ import random
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
+OPENAI_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/chat/completions"
 SYSTEM_PROMPT = "あなたは医師を支援する医療AIです。病歴を読み、鑑別診断を挙げ、検証的推論を行い最終診断を考えてください。"
 FIELDS = ["case_id", "model", "gold", "predicted_final", "final_match", "gold_in_output", "seconds", "output"]
 
@@ -51,6 +59,39 @@ def load_cases(path: str) -> list:
             if history and gold:
                 cases.append({"case_id": i, "病歴": history, "最終診断": gold.group(1).strip()})
     return cases
+
+
+def ask_openai(model: str, history: str, timeout: int = 900) -> str:
+    """OpenAIのAPIで同じ症例を解かせる(比較用)。推論型のモデルは temperature を指定できないので指定しない。"""
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("環境変数 OPENAI_API_KEY が設定されていません")
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"'病歴': {history}"},
+        ],
+        # 推論型のモデルは、内部の思考にもこの上限を使うので大きめにする
+        "max_completion_tokens": 16000,
+    }
+    req = urllib.request.Request(
+        OPENAI_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            data = json.loads(res.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}") from e
+    return (data["choices"][0]["message"].get("content") or "").strip()
+
+
+def ask_model(model: str, history: str, num_ctx: int) -> str:
+    if model.startswith("openai:"):
+        return ask_openai(model[len("openai:") :], history)
+    return ask_ollama(model, history, num_ctx=num_ctx)
 
 
 def ask_ollama(model: str, history: str, timeout: int = 900, num_ctx: int = 8192) -> str:
@@ -136,6 +177,10 @@ def main() -> None:
     ap.add_argument("--out", default="eval_result.csv")
     args = ap.parse_args()
 
+    if any(m.startswith("openai:") for m in args.models):
+        if not os.environ.get("OPENAI_API_KEY"):
+            sys.exit("openai: のモデルを使うには、先に export OPENAI_API_KEY=... を実行してください。")
+        print("※ openai: のモデルには症例の文章がOpenAIに送られます(実在の患者情報は含めないでください)")
     cases = load_cases(args.data)
     train_histories = set()
     for path in args.train:
@@ -164,7 +209,7 @@ def main() -> None:
                 print(f"[{model}] {k}/{len(selected)} 症例{case['case_id']} …", end="", flush=True)
                 start = time.time()
                 try:
-                    output = ask_ollama(model, case["病歴"], num_ctx=args.num_ctx)
+                    output = ask_model(model, case["病歴"], args.num_ctx)
                 except Exception as e:  # 1件の失敗で全体を止めない
                     output = f"(エラー: {e})"
                 final = extract_final(output)
