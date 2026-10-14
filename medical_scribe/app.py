@@ -787,66 +787,66 @@ def extract_findings_chunk(text: str, backend: str, api_key: str, local_model_pa
     側性(左右)や所見の有無を、自由文に埋め込まず個別項目として扱うことで、
     LLMが「不明」を正直に選べるようにし(自由文要約では確認済みの通り機能しなかった)、
     医師が1項目ずつ確認する運用を可能にする。
+    出力はJSONではなく「項目名｜側性｜内容｜確信度」の1行1所見にしている。ローカルLLMは
+    1秒に十数文字しか書けないため、JSONのキー名や長い選択肢を毎回書かせると、それだけで
+    抽出時間が倍近くになる(内容は同じで、書き方だけを短くしたもの)。
     """
-    prompt = f"""以下はカルテ下書きです。診断・治療方針に直結する重要な所見を構造化して抽出してください。
+    prompt = f"""以下はカルテ下書きです。診断・治療方針に直結する重要な所見を抽出してください。
 患者が訴えた症状・変化(食欲・睡眠・排便・気分など)と、医師が述べた身体所見(皮膚・脈・頸部など)と検査結果は、
 軽そうに見えても省略せず、1つずつ別の項目として挙げてください。
 項目名は会話中の言葉に基づけてください。会話に出ていない診断名や専門用語に置き換えないでください
 (例:患者が「胸がしめつけられる」と言っただけなら「胸のしめつけ感」とし、「狭心症」とはしない)。
 
-重要: 「不明」は、その情報が本当にテキスト中に存在しない場合にのみ使ってください。
-テキストに明確に書かれている内容は、省略したり「不明」にせず、そのまま正確に抽出してください。
-「不明」を安全策として多用することは、情報を省略することになり、推測で埋めることと同じくらい有害です。
+1行に1所見を、次の形式で書いてください。前置き・説明・見出しは書かないでください。
+項目名｜側性｜内容｜確信度
 
-"value" フィールドについて:
-- テキストに明確な記載がある場合は、その内容をそのまま書いてください(例: 「TSHが著明に低下」→ value: "低下")。
-- テキストに記載が無く、本当に判断できない場合のみ "不明" としてください。
-
-"laterality" フィールドについて、まず「この所見はそもそも左右の概念を持つか」を判断してください:
-- 疼痛・麻痺・浮腫・感覚障害・腫脹のように、身体の左右どちらかに起こりうる所見 →
-  テキストに明記されていれば "右"/"左"/"両側"、明記されていなければ "不明"
-- 動悸・体重減少・発熱・血液検査値のように、そもそも左右の概念が無い所見 →
-  常に "なし(左右関係なし)" としてください("不明" にしないでください)
-
-confidence フィールドには、その抽出の確信度を "high" または "low" で入れてください。
-テキストに明確な記載がある場合は "high" です。表現が曖昧だったり、間接的な推測を含む場合のみ "low" にしてください。
+- 内容: テキストに書かれている内容をそのまま短く書く(例: 「TSHが著明に低下」→ 低下)。
+  「不明」は、その情報が本当にテキストに無い場合だけ使う。書かれていることを「不明」にするのは、推測で埋めるのと同じくらい有害です。
+- 側性: 右/左/両側/なし/不明 のどれか。
+  疼痛・麻痺・浮腫・感覚障害・腫脹のように左右どちらかに起こりうる所見は、明記されていれば 右/左/両側、明記されていなければ 不明。
+  動悸・体重減少・発熱・血液検査値のように、そもそも左右の概念が無い所見は 常に なし。
+- 確信度: テキストに明確な記載があれば 高、表現が曖昧・間接的な推測を含むなら 低。
 
 【例】
-テキスト: "TSHが著明に低下していて、FT4とFT3はどちらも上昇していた。"
-出力の一部: {{"item": "TSH", "laterality": "なし(左右関係なし)", "value": "低下", "confidence": "high"}}
-
-テキスト: "右下肺野に湿性ラ音を聴取した。"
-出力の一部: {{"item": "肺野の異常音", "laterality": "右", "value": "湿性ラ音", "confidence": "high"}}
-
-次のJSON形式で出力してください(他のテキストは含めないでください):
-{{
-  "findings": [
-    {{"item": "所見名", "laterality": "右/左/両側/なし(左右関係なし)/不明 のいずれか", "value": "具体的な内容", "confidence": "high または low"}}
-  ]
-}}
+テキスト: "TSHが著明に低下していて、右下肺野に湿性ラ音を聴取した。"
+出力:
+TSH｜なし｜低下｜高
+肺野の異常音｜右｜湿性ラ音｜高
 
 【カルテ下書き】
 {text}
 """
-    if backend == "ローカル(Swallow)":
-        raw_output = generate_with_local_llm(prompt, local_model_path)
-        data = extract_json_block(raw_output)
-    elif backend == "ローカル(Ollama・Mac向け)":
-        # OllamaのJSONモードで出力をJSONに制約する(念のため抽出処理も通す)
-        raw_output = generate_with_ollama(prompt, local_model_path, json_mode=True)
-        data = extract_json_block(raw_output)
-    else:
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+    raw_output = run_llm(prompt, backend, api_key, local_model_path)
+    return apply_laterality_rules(parse_findings_lines(raw_output))
+
+
+FINDING_CONFIDENCE = {"高": "high", "低": "low", "high": "high", "low": "low"}
+
+
+def parse_findings_lines(output: str) -> list:
+    """「項目名｜側性｜内容｜確信度」の行を所見のリストにする。
+    モデルが指示に従わずJSONで答えた場合も読めるようにしておく。
+    """
+    if '"findings"' in output:
+        data = extract_json_block(output)
+        if data.get("findings"):
+            return data["findings"]
+    findings = []
+    for line in output.splitlines():
+        # 箇条書きの記号・番号と、表形式で書かれた場合の両端の「|」を外す
+        line = re.sub(r"^\s*(?:[-*・]|\d+[.)．])\s+", "", line.strip()).strip("|｜ ")
+        cells = [c.strip(" *`") for c in re.split(r"[｜|]", line)]
+        if len(cells) < 3 or not cells[0] or cells[0] in ("項目名", "項目") or set(cells[0]) <= set("-: "):
+            continue  # 見出し行・表の区切り線・説明文は読み飛ばす
+        findings.append(
+            {
+                "item": cells[0],
+                "laterality": cells[1],
+                "value": cells[2] or "不明",
+                "confidence": FINDING_CONFIDENCE.get(cells[3] if len(cells) > 3 else "", "low"),
+            }
         )
-        try:
-            data = json.loads(response.choices[0].message.content)
-        except (json.JSONDecodeError, AttributeError):
-            data = {}
-    return apply_laterality_rules(data.get("findings", []))
+    return findings
 
 
 def highlight_diff_html(raw_text: str, corrected_text: str) -> str:
