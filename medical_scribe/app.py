@@ -60,6 +60,7 @@ import os
 import platform
 import re
 import tempfile
+import time
 import urllib.request
 
 import streamlit as st
@@ -172,6 +173,10 @@ def generate_with_ollama(
     生成結果を少しずつ受け取る(ストリーミング)ので、全体に時間がかかっても途中で
     タイムアウトしない(タイムアウトは「300秒間なにも返ってこない」場合だけ)。
     """
+    think = thinking_setting(model_name)
+    if think is False:
+        # 古いOllamaは think の指定を無視するので、Qwen3自身が理解する「考えない」合図も付ける
+        prompt += "\n/no_think"
     messages = [{"role": "system", "content": system}] if system else []
     messages.append({"role": "user", "content": prompt})
     payload = {
@@ -187,7 +192,6 @@ def generate_with_ollama(
     }
     if json_mode:
         payload["format"] = "json"
-    think = thinking_setting(model_name)
     if think is not None:
         payload["think"] = think
     req = urllib.request.Request(
@@ -419,6 +423,7 @@ SPEAKER_CHUNK = 40  # 話者推定で一度にLLMへ渡す文の数
 CHUNK_CHARS = 1200  # ③④⑤で一度にLLMへ渡す文字数の目安
 MAX_CANDIDATE_TERMS = 300  # ③の指示文に載せる用語リストの上限(長すぎると遅くなるため)
 MAX_CORRECTION_LEN = 15  # ③で1件として受け付ける「元の表記」の最大文字数(語句単位に限る)
+FINDINGS_CHUNK_CHARS = 2500  # ⑤で一度に渡す文字数。長い指示文を毎回読ませる回数を減らして速くする
 CORRECTION_CHUNK_CHARS = 2500  # ③(修正箇所の一覧だけを出力させる)で一度に渡す文字数
 
 
@@ -763,7 +768,7 @@ def is_paraphrased(item: str, text: str) -> bool:
 def extract_structured_findings(text: str, backend: str, api_key: str, local_model_path: str, progress=None) -> list:
     """長い会話は分割して抽出し、同じ項目名の重複を除いてまとめる。progress(i, n) で進み具合を知らせる。"""
     merged, seen = [], set()
-    chunks = split_into_chunks(text)
+    chunks = split_into_chunks(text, max_chars=FINDINGS_CHUNK_CHARS)
     for i, c in enumerate(chunks):
         if progress:
             progress(i, len(chunks))
@@ -1579,18 +1584,24 @@ if uploaded_file:
                     if llm_backend == "ローカル(Ollama・Mac向け)":
                         unload_all_ollama(keep=local_model_path)  # ⑧のモデル等が残っているとメモリ不足で遅くなる
                     bar = st.progress(0.0, text="抽出中...")
+                    start = time.time()
                     st.session_state.findings = extract_structured_findings(
                         reviewed_text,
                         llm_backend,
                         api_key,
                         local_model_path,
-                        progress=lambda i, n: bar.progress(i / n, text=f"抽出中...({i}/{n} ブロック完了)"),
+                        progress=lambda i, n: bar.progress(
+                            i / n, text=f"抽出中...({i}/{n} ブロック完了・{time.time() - start:.0f}秒経過)"
+                        ),
                     )
+                    st.session_state.findings_seconds = time.time() - start
                     st.session_state.findings_source = reviewed_text
                     # 抽出し直したら、前回の入力・チェック状態を引き継がない
                     st.session_state.findings_run = st.session_state.get("findings_run", 0) + 1
 
             if "findings" in st.session_state:
+                if "findings_seconds" in st.session_state:
+                    st.caption(f"抽出にかかった時間: {st.session_state.findings_seconds:.0f}秒({local_model_path or llm_backend})")
                 if not st.session_state.findings:
                     st.info("抽出できる重要所見が見つかりませんでした。")
                 all_confirmed = True
