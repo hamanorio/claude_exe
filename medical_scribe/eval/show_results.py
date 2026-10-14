@@ -9,7 +9,7 @@ import argparse
 import csv
 from collections import OrderedDict
 
-from eval_ddx import extract_final, is_match
+from eval_ddx import extract_final, is_match, latest_rows
 
 
 def rescore(rows: list) -> None:
@@ -26,7 +26,7 @@ def main() -> None:
     args = ap.parse_args()
 
     with open(args.csv_path, encoding="utf-8-sig") as fh:
-        rows = list(csv.DictReader(fh))
+        rows = latest_rows(list(csv.DictReader(fh)))
     rescore(rows)
     models = list(OrderedDict.fromkeys(r["model"] for r in rows))
 

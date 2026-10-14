@@ -229,7 +229,8 @@ def main() -> None:
     done = set()
     if os.path.exists(args.out):
         with open(args.out, encoding="utf-8-sig") as fh:
-            done = {(r["case_id"], r["model"]) for r in csv.DictReader(fh)}
+            # エラーで終わった症例は「済み」にせず、再実行したときにやり直す
+            done = {(r["case_id"], r["model"]) for r in csv.DictReader(fh) if not r["output"].startswith("(エラー:")}
     new_file = not os.path.exists(args.out)
     with open(args.out, "a", encoding="utf-8-sig", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=FIELDS)
@@ -264,9 +265,17 @@ def main() -> None:
     summarize(args.out, args.models)
 
 
+def latest_rows(rows: list) -> list:
+    """同じ症例・同じモデルの行が複数あれば(エラー後のやり直しなど)、最後の行だけを残す。"""
+    latest = {}
+    for r in rows:
+        latest[(r["case_id"], r["model"])] = r
+    return list(latest.values())
+
+
 def summarize(path: str, models: list) -> None:
     with open(path, encoding="utf-8-sig") as fh:
-        rows = list(csv.DictReader(fh))
+        rows = latest_rows(list(csv.DictReader(fh)))
     print("\n=== 集計(自動判定。表記ゆれは「要目視」に含まれるので、CSVで確認してください) ===")
     for model in models:
         rs = [r for r in rows if r["model"] == model]
