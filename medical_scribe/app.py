@@ -145,6 +145,26 @@ def unload_all_ollama(keep: str = "") -> list:
 OLLAMA_MAX_TOKENS = 2048  # 1回の生成の上限。ローカルLLMが同じ文を繰り返し続けて終わらないのを防ぐ
 
 
+# 答える前に「考える」型のモデル。補正・抽出には深い推論は要らず、考える分だけ遅くなるので減らす。
+# Qwen3 は考える機能を切れる(False)。GPT-OSS は切れないので一番少ない "low" にする
+THINKING_MODEL_SETTINGS = {"qwen3": False, "gpt-oss": "low"}
+
+
+def thinking_setting(model_name: str):
+    for prefix, value in THINKING_MODEL_SETTINGS.items():
+        if model_name.lower().startswith(prefix):
+            return value
+    return None
+
+
+def strip_thinking(text: str) -> str:
+    """古いOllamaでは、考えた過程が <think>…</think> として出力に混ざるので取り除く。"""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    if "<think>" in text:  # 考えている途中で上限に達した
+        text = text.split("<think>")[0]
+    return text.strip()
+
+
 def generate_with_ollama(
     prompt: str, model_name: str, json_mode: bool = False, system: str = "", max_tokens: int = OLLAMA_MAX_TOKENS
 ) -> str:
@@ -167,6 +187,9 @@ def generate_with_ollama(
     }
     if json_mode:
         payload["format"] = "json"
+    think = thinking_setting(model_name)
+    if think is not None:
+        payload["think"] = think
     req = urllib.request.Request(
         OLLAMA_URL,
         data=json.dumps(payload).encode("utf-8"),
@@ -184,9 +207,10 @@ def generate_with_ollama(
                 break
             # JSONモードでは、JSONを閉じた後も空白を上限まで出し続けることがあるため、
             # JSONとして完成した時点で受け取りを打ち切る(接続を閉じるとOllama側の生成も止まる)
-            if json_mode and "}" in piece and is_complete_json("".join(parts)):
+            if json_mode and "}" in piece and is_complete_json(strip_thinking("".join(parts))):
                 break
-    return "".join(parts).strip()
+    # 新しいOllamaでは考えた過程は message["thinking"] に分かれて届くので、content だけを使う
+    return strip_thinking("".join(parts))
 
 
 def is_complete_json(text: str) -> bool:
@@ -1226,8 +1250,10 @@ with st.sidebar:
     elif llm_backend == "ローカル(Ollama・Mac向け)":
         local_model_path = st.text_input(
             "Ollamaのモデル名",
-            "swallow-8b",
-            help="`ollama list` で表示される名前。4bit量子化(Q4_K_M)のSwallow 8B Instructを推奨。",
+            "qwen3:14b",
+            help="`ollama list` で表示される名前。初期値はQwen3 14B(`ollama pull qwen3:14b` で入手、約9GB)。"
+            "Swallow 8B を使う場合は swallow-8b と入力してください。"
+            "Qwen3 は答える前に考える型のモデルですが、②〜⑤では考える機能を切って速く動かします。",
         )
         st.caption("⚠️ 事前にOllamaを起動しておいてください。16GBのMacでは他のアプリを閉じておくと安定します。")
     else:
