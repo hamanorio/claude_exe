@@ -183,11 +183,16 @@ def apply_sound_match(hyp_text: str, ref: str, term_files: list):
     entries, index = sound_match.build_sound_index(terms)
     matches = sound_match.find_sound_alike(hyp_text, entries, index, set(terms) | sound_match.stop_words())
     fixed = sound_match.apply_sound_replacements(hyp_text, matches, {(m[2], m[3]) for m in matches})
+    # 正解に足りない用語の回数(正解での回数 − 文字起こしでの回数)。前後の文字も誤っていて
+    # 文脈では判定できない候補も、この不足分を埋めるものなら「合う」と数える
+    hyp_norm = normalize(hyp_text)
+    shortage = {t: ref.count(normalize(t)) - hyp_norm.count(normalize(t)) for t in {m[3] for m in matches}}
     ok, wrong = 0, []
     for start, end, surface, term, _ in matches:
         left, right = hyp_text[max(0, start - 3) : start], hyp_text[end : end + 3]
-        if normalize(left + term) in ref or normalize(term + right) in ref:
+        if normalize(left + term) in ref or normalize(term + right) in ref or shortage[term] > 0:
             ok += 1
+            shortage[term] -= 1
         else:
             wrong.append(f"{surface}→{term}")
     return fixed, len(matches), ok, wrong
