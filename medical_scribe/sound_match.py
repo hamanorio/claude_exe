@@ -130,10 +130,17 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
                     # 「は異変」→「排便」のように、助詞などのひらがなで始まる区切りを漢字の用語にしない
                     if HIRAGANA_START.search(surface_v) and not HIRAGANA_START.search(term):
                         continue
+                    # 用語もひらがなで始まる場合でも、先頭の文字が違えば別の語(「に応じ」→「お通じ」)
+                    if HIRAGANA_START.search(surface_v) and surface_v[0] != term[0]:
+                        continue
                     # 辞書にある普通の単語(読み変換で1語として扱われる「階段」「判断」「乾燥」等)は、
                     # 読みが完全に同じ場合(「動機」→「動悸」)だけ置き換える。読みが少し違うだけでは
                     # 「階段」→「改善」「判断」→「診断」のような誤った候補ばかりになるため
                     if ratio < 1.0 and j == i and KANJI.search(surface_v):
+                        continue
+                    # 送り仮名の付いた単語(「応じ」「話し」)に助詞などが続いただけの区切り(「応じて」)も同じ扱い
+                    kanji_toks = [t for t, _ in toks[i : j + 1] if KANJI.search(t)]
+                    if ratio < 1.0 and len(kanji_toks) == 1 and HIRAGANA_ANY.search(kanji_toks[0]):
                         continue
                     # 用語の一部になっている言葉(「心房細動」の「心房」)はそれ自体が正しい語なので、
                     # 読みが少し違うだけの別の用語(「心臓」)に置き換えない。読みが完全一致する場合は残す
