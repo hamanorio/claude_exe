@@ -20,6 +20,8 @@
   --sound-match  アプリの①-2(用語の音照合)の候補を「すべて採用した場合」の成績も出します。
                  候補のうち正解と合うものの数も数えるので、①-2がどれだけ取り戻せて、どれだけ誤った候補を
                  出しているかが分かります。用語リストは term_lists の全ファイル(--term-files で絞れます)。
+  マイクの録り比べ: 同じ会話を2台で同時に録り、「会話A__今.m4a」「会話A__外付け.m4a」のように
+                 「__」の後ろにマイクの名前を付けると、どちらも正解「会話A.txt」1つで採点します。
   --reuse        前回の文字起こし結果(文字起こし結果フォルダ)があれば使い回します。①-2や採点だけを
                  調整して測り直すときに、時間のかかる文字起こしを省けます。
 
@@ -255,11 +257,16 @@ def main() -> None:
     hyp_dir = os.path.join(args.dir, "文字起こし結果")
     os.makedirs(hyp_dir, exist_ok=True)
 
-    rows = []
+    rows, drafted = [], set()
     for audio in audios:
         case = os.path.splitext(audio)[0]
         ref_path = os.path.join(args.dir, case + ".txt")
-        has_ref = os.path.exists(ref_path)
+        # 「会話A__今.m4a」「会話A__外付け.m4a」のように同じ会話を別のマイクで録ったものは、
+        # 正解「会話A.txt」を共通で使う(マイクの録り比べ用)
+        if "__" in case and not os.path.exists(ref_path):
+            ref_path = os.path.join(args.dir, case.split("__")[0] + ".txt")
+        # 今回の実行で下書きを作った正解は、まだ直されていないので採点に使わない
+        has_ref = os.path.exists(ref_path) and ref_path not in drafted
         if not has_ref and not args.draft:
             print(f"[{case}] 正解の {case}.txt がないので飛ばします(--draft で下書きを作れます)")
             continue
@@ -279,9 +286,10 @@ def main() -> None:
                 with open(hyp_path, "w", encoding="utf-8") as fh:
                     fh.write(hyp_text)
             if not has_ref:
-                if k == 0:
+                if k == 0 and not os.path.exists(ref_path):
                     with open(ref_path, "w", encoding="utf-8") as fh:
                         fh.write(hyp_text)
+                    drafted.add(ref_path)
                     print(f"  → 下書きを {ref_path} に書き出しました。正しく直してから再実行してください。")
                 continue
             ref = normalize(read_text(ref_path))
