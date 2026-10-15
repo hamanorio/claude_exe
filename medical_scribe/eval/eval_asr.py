@@ -198,6 +198,19 @@ def apply_sound_match(hyp_text: str, ref: str, term_files: list):
     return fixed, len(matches), ok, wrong
 
 
+def diff_lines(ref: str, hyp: str, context: int = 6) -> list:
+    """正解と文字起こしが食い違う箇所を「正解 / 文字起こし」の形で並べる(前後の文字も付ける)。"""
+    import difflib
+
+    lines = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ref, hyp, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        before, after = ref[max(0, i1 - context) : i1], ref[i2 : i2 + context]
+        lines.append(f"…{before}【{ref[i1:i2] or '(なし)'}】{after}…  ←  文字起こし:【{hyp[j1:j2] or '(なし)'}】")
+    return lines
+
+
 # ---------- 本体 ----------
 
 
@@ -257,6 +270,9 @@ def main() -> None:
                 ref = normalize(fh.read())
             hyp = normalize(hyp_text)
             in_ref, ok, missed = term_check(ref, hyp, terms)
+            # 食い違う箇所の一覧(どの語がどう誤認識されたかを見るため)
+            with open(hyp_path.replace(".txt", "__食い違い.txt"), "w", encoding="utf-8") as fh:
+                fh.write("\n".join(diff_lines(ref, hyp)))
             sound = {}
             if args.sound_match:
                 fixed, n_sug, n_ok, wrong = apply_sound_match(hyp_text, ref, args.term_files)
@@ -326,7 +342,7 @@ def main() -> None:
                 f"  └ ①-2をすべて採用: 文字誤り率 {cer_s:.1f}%  医学用語の認識率 {rate_s}({ok_s}/{t_in})"
                 f"  候補 {n_sug}件のうち正解と合う {n_ok}件"
             )
-    print(f"\n詳細: {args.out} / 文字起こし全文: {hyp_dir}")
+    print(f"\n詳細: {args.out} / 文字起こし全文と食い違いの一覧(…__食い違い.txt): {hyp_dir}")
 
 
 if __name__ == "__main__":
