@@ -15,6 +15,13 @@
 使い方:
   python3 eval_asr.py --dir asr_test --engines mlx:large-v3-turbo mlx:large-v3 kotoba
   python3 eval_asr.py --dir asr_test --engines mlx:large-v3-turbo --hint "甲状腺、バセドウ病、動悸"
+  python3 eval_asr.py --dir asr_test --engines mlx:large-v3-turbo --reuse --sound-match
+
+  --sound-match  アプリの①-2(用語の音照合)の候補を「すべて採用した場合」の成績も出します。
+                 候補のうち正解と合うものの数も数えるので、①-2がどれだけ取り戻せて、どれだけ誤った候補を
+                 出しているかが分かります。用語リストは term_lists の全ファイル(--term-files で絞れます)。
+  --reuse        前回の文字起こし結果(文字起こし結果フォルダ)があれば使い回します。①-2や採点だけを
+                 調整して測り直すときに、時間のかかる文字起こしを省けます。
 
   正解の txt がまだ無い録音は、--draft を付けると最初のエンジンの結果を txt として書き出します。
   それを開いて正しく直してから、もう一度実行してください(直していない下書きで測ると100点になります)。
@@ -34,6 +41,7 @@ import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TERM_LIST_DIR = os.path.join(HERE, "..", "term_lists")
+sys.path.insert(0, os.path.join(HERE, ".."))  # アプリと同じ音照合(sound_match.py)を使う
 AUDIO_EXTS = (".m4a", ".mp3", ".wav", ".mp4", ".mov")
 MLX_REPOS = {
     "medium": "mlx-community/whisper-medium-mlx",
@@ -41,7 +49,22 @@ MLX_REPOS = {
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
 }
 KOTOBA_MODEL = "kotoba-tech/kotoba-whisper-v2.0"
-FIELDS = ["case", "engine", "ref_chars", "cer", "terms_in_ref", "terms_ok", "missed_terms", "seconds"]
+FIELDS = [
+    "case",
+    "engine",
+    "ref_chars",
+    "cer",
+    "terms_in_ref",
+    "terms_ok",
+    "missed_terms",
+    "seconds",
+    "cer_sound",
+    "terms_ok_sound",
+    "missed_terms_sound",
+    "suggestions",
+    "suggestions_ok",
+    "wrong_suggestions",
+]
 
 
 # ---------- 文字起こし ----------
@@ -147,6 +170,29 @@ def term_check(ref: str, hyp: str, terms: list):
     return in_ref, ok, missed
 
 
+def apply_sound_match(hyp_text: str, ref: str, term_files: list):
+    """アプリの①-2と同じ方法で候補を出し、すべて採用した文字起こしを返す。
+    あわせて、候補が正解と合うか(置き換えた語が、前後の文脈ごと正解に出てくるか)を目安として数える。
+    """
+    import sound_match
+
+    terms = []
+    for name in term_files:
+        terms += sound_match.load_term_file(name)
+    terms = tuple(dict.fromkeys(terms))
+    entries, index = sound_match.build_sound_index(terms)
+    matches = sound_match.find_sound_alike(hyp_text, entries, index, set(terms) | sound_match.stop_words())
+    fixed = sound_match.apply_sound_replacements(hyp_text, matches, {(m[2], m[3]) for m in matches})
+    ok, wrong = 0, []
+    for start, end, surface, term, _ in matches:
+        left, right = hyp_text[max(0, start - 3) : start], hyp_text[end : end + 3]
+        if normalize(left + term) in ref or normalize(term + right) in ref:
+            ok += 1
+        else:
+            wrong.append(f"{surface}→{term}")
+    return fixed, len(matches), ok, wrong
+
+
 # ---------- 本体 ----------
 
 
@@ -156,8 +202,15 @@ def main() -> None:
     ap.add_argument("--engines", nargs="+", default=["mlx:large-v3-turbo"])
     ap.add_argument("--hint", default="", help="Whisperに渡す医学用語のヒント(アプリのサイドバーと同じもの)")
     ap.add_argument("--draft", action="store_true", help="正解txtが無い録音は、最初のエンジンの結果を下書きとして書き出す")
+    ap.add_argument("--sound-match", action="store_true", help="①-2の音照合の候補をすべて採用した場合の成績も出す")
+    ap.add_argument("--term-files", nargs="*", default=None, help="①-2に使う用語リスト(例: 01_内科一般 05_内分泌代謝)。省略時は全部")
+    ap.add_argument("--reuse", action="store_true", help="前回の文字起こし結果があれば使い回す(文字起こしを省く)")
     ap.add_argument("--out", default="asr_result.csv")
     args = ap.parse_args()
+    if args.sound_match and args.term_files is None:
+        import sound_match
+
+        args.term_files = sound_match.list_term_files()
 
     audios = sorted(f for f in os.listdir(args.dir) if f.lower().endswith(AUDIO_EXTS))
     if not audios:
@@ -175,13 +228,20 @@ def main() -> None:
             print(f"[{case}] 正解の {case}.txt がないので飛ばします(--draft で下書きを作れます)")
             continue
         for k, engine in enumerate(args.engines):
-            print(f"[{case}] {engine} で文字起こし中…", end="", flush=True)
-            start = time.time()
-            hyp_text = transcribe(engine, os.path.join(args.dir, audio), args.hint)
-            seconds = round(time.time() - start, 1)
-            print(f" {seconds}秒")
-            with open(os.path.join(hyp_dir, f"{case}__{engine.replace(':', '_')}.txt"), "w", encoding="utf-8") as fh:
-                fh.write(hyp_text)
+            hyp_path = os.path.join(hyp_dir, f"{case}__{engine.replace(':', '_')}.txt")
+            if args.reuse and os.path.exists(hyp_path):
+                with open(hyp_path, encoding="utf-8") as fh:
+                    hyp_text = fh.read()
+                seconds = ""
+                print(f"[{case}] {engine}: 前回の文字起こし結果を使います")
+            else:
+                print(f"[{case}] {engine} で文字起こし中…", end="", flush=True)
+                start = time.time()
+                hyp_text = transcribe(engine, os.path.join(args.dir, audio), args.hint)
+                seconds = round(time.time() - start, 1)
+                print(f" {seconds}秒")
+                with open(hyp_path, "w", encoding="utf-8") as fh:
+                    fh.write(hyp_text)
             if not has_ref:
                 if k == 0:
                     with open(ref_path, "w", encoding="utf-8") as fh:
@@ -192,8 +252,22 @@ def main() -> None:
                 ref = normalize(fh.read())
             hyp = normalize(hyp_text)
             in_ref, ok, missed = term_check(ref, hyp, terms)
+            sound = {}
+            if args.sound_match:
+                fixed, n_sug, n_ok, wrong = apply_sound_match(hyp_text, ref, args.term_files)
+                fixed_norm = normalize(fixed)
+                _, ok_s, missed_s = term_check(ref, fixed_norm, terms)
+                sound = {
+                    "cer_sound": round(100 * edit_distance(ref, fixed_norm) / max(1, len(ref)), 1),
+                    "terms_ok_sound": ok_s,
+                    "missed_terms_sound": "、".join(missed_s),
+                    "suggestions": n_sug,
+                    "suggestions_ok": n_ok,
+                    "wrong_suggestions": "、".join(wrong),
+                }
             rows.append(
                 {
+                    **sound,
                     "case": case,
                     "engine": engine,
                     "ref_chars": len(ref),
@@ -216,8 +290,16 @@ def main() -> None:
     for r in rows:
         print(
             f"{r['case']}  {r['engine']}: 文字誤り率 {r['cer']}%  用語 {r['terms_ok']}/{r['terms_in_ref']}"
-            f"  {r['seconds']}秒" + (f"\n    取りこぼした用語: {r['missed_terms']}" if r["missed_terms"] else "")
+            + (f"  {r['seconds']}秒" if r["seconds"] != "" else "")
+            + (f"\n    取りこぼした用語: {r['missed_terms']}" if r["missed_terms"] else "")
         )
+        if "suggestions" in r:
+            print(
+                f"    ①-2をすべて採用: 文字誤り率 {r['cer_sound']}%  用語 {r['terms_ok_sound']}/{r['terms_in_ref']}"
+                f"  候補 {r['suggestions']}件(正解と合う {r['suggestions_ok']}件)"
+                + (f"\n      まだ取りこぼしている用語: {r['missed_terms_sound']}" if r["missed_terms_sound"] else "")
+                + (f"\n      正解と合わない候補: {r['wrong_suggestions']}" if r["wrong_suggestions"] else "")
+            )
     print("\n=== エンジンごとの合計 ===")
     for engine in args.engines:
         rs = [r for r in rows if r["engine"] == engine]
@@ -229,6 +311,16 @@ def main() -> None:
         t_ok = sum(r["terms_ok"] for r in rs)
         rate = f"{100 * t_ok / t_in:.0f}%" if t_in else "-"
         print(f"{engine}: 文字誤り率 {cer:.1f}%  医学用語の認識率 {rate}({t_ok}/{t_in})  {len(rs)}件")
+        if all("suggestions" in r for r in rs):
+            cer_s = sum(r["cer_sound"] * r["ref_chars"] for r in rs) / max(1, chars)
+            ok_s = sum(r["terms_ok_sound"] for r in rs)
+            n_sug = sum(r["suggestions"] for r in rs)
+            n_ok = sum(r["suggestions_ok"] for r in rs)
+            rate_s = f"{100 * ok_s / t_in:.0f}%" if t_in else "-"
+            print(
+                f"  └ ①-2をすべて採用: 文字誤り率 {cer_s:.1f}%  医学用語の認識率 {rate_s}({ok_s}/{t_in})"
+                f"  候補 {n_sug}件のうち正解と合う {n_ok}件"
+            )
     print(f"\n詳細: {args.out} / 文字起こし全文: {hyp_dir}")
 
 
