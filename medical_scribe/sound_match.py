@@ -93,44 +93,53 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
         for j in range(i, min(i + max_tokens, len(toks))):
             surface += toks[j][0]
             reading += toks[j][1]
-            # 前後のひらがなを除いた中心部分(「なる症状」→「症状」)も、用語・除外語なら対象外
-            core = re.sub(r"^[\u3040-\u309f]+|[\u3040-\u309f]+$", "", surface)
-            if len(reading) < 3 or len(surface) < 2 or HIRAGANA_ONLY.match(surface) or surface in term_set or core in term_set:
-                continue
-            if re.search(r"[：:、。？！?!\s]", surface):
-                continue  # 話者ラベルや句読点をまたぐ区切りは対象外
-            if protected & set(range(starts[i], starts[i] + len(surface))):
-                continue
-            cands = set()
-            for k in range(len(reading) - 1):
-                cands |= index.get(reading[k : k + 2], set())
-            for idx in cands:
-                term, term_reading = entries[idx]
-                if abs(len(term_reading) - len(reading)) > 2 or term in surface or surface in term:
+            variants = [(surface, reading)]
+            # 読み変換は「厚がりになった」を「厚」「がりになった」のように区切るので、
+            # 最後のひらがなのまとまりの一部だけを付けた区切り(「厚がり」)も試す。
+            # 1文字だけ付けると「服用し」→「副作用」のように動詞の活用を拾うので、2文字以上に限る
+            tok = toks[j][0]
+            if j > i and HIRAGANA_ONLY.match(tok) and len(tok) > 2:
+                base_s, base_r = surface[: -len(tok)], reading[: -len(toks[j][1])]
+                variants += [(base_s + tok[:k], base_r + tok[:k]) for k in range(2, len(tok))]
+            for surface_v, reading_v in variants:
+                # 前後のひらがなを除いた中心部分(「なる症状」→「症状」)も、用語・除外語なら対象外
+                core = re.sub(r"^[\u3040-\u309f]+|[\u3040-\u309f]+$", "", surface_v)
+                if len(reading_v) < 3 or len(surface_v) < 2 or HIRAGANA_ONLY.match(surface_v) or surface_v in term_set or core in term_set:
                     continue
-                # 「脈は」→「脈拍」のように、助詞で終わる区切りを漢字で終わる用語と取り違えない
-                if PARTICLE_END.search(surface) and not HIRAGANA_END.search(term):
+                if re.search(r"[：:、。？！?!\s]", surface_v):
+                    continue  # 話者ラベルや句読点をまたぐ区切りは対象外
+                if protected & set(range(starts[i], starts[i] + len(surface_v))):
                     continue
-                # 「甲状腺にホルモン」→「甲状腺ホルモン」のように、助詞をはさんだ2語を1語にしない
-                if PARTICLE_MID.search(surface) and not HIRAGANA_ANY.search(term):
-                    continue
-                ratio = difflib.SequenceMatcher(None, reading, term_reading).ratio()
-                # 短い語は読みが完全一致する場合のみ(偶然の一致を避ける)
-                if ratio < (1.0 if len(term_reading) <= 3 else 0.75):
-                    continue
-                # 「は異変」→「排便」のように、助詞などのひらがなで始まる区切りを漢字の用語にしない
-                if HIRAGANA_START.search(surface) and not HIRAGANA_START.search(term):
-                    continue
-                # 辞書にある普通の単語(読み変換で1語として扱われる「階段」「判断」「乾燥」等)は、
-                # 読みが完全に同じ場合(「動機」→「動悸」)だけ置き換える。読みが少し違うだけでは
-                # 「階段」→「改善」「判断」→「診断」のような誤った候補ばかりになるため
-                if ratio < 1.0 and j == i and KANJI.search(surface):
-                    continue
-                # 用語の一部になっている言葉(「心房細動」の「心房」)はそれ自体が正しい語なので、
-                # 読みが少し違うだけの別の用語(「心臓」)に置き換えない。読みが完全一致する場合は残す
-                if ratio < 1.0 and any(surface in w for w in term_set):
-                    continue
-                found.append((starts[i], starts[i] + len(surface), surface, term, ratio))
+                cands = set()
+                for k in range(len(reading_v) - 1):
+                    cands |= index.get(reading_v[k : k + 2], set())
+                for idx in cands:
+                    term, term_reading = entries[idx]
+                    if abs(len(term_reading) - len(reading_v)) > 2 or term in surface_v or surface_v in term:
+                        continue
+                    # 「脈は」→「脈拍」のように、助詞で終わる区切りを漢字で終わる用語と取り違えない
+                    if PARTICLE_END.search(surface_v) and not HIRAGANA_END.search(term):
+                        continue
+                    # 「甲状腺にホルモン」→「甲状腺ホルモン」のように、助詞をはさんだ2語を1語にしない
+                    if PARTICLE_MID.search(surface_v) and not HIRAGANA_ANY.search(term):
+                        continue
+                    ratio = difflib.SequenceMatcher(None, reading_v, term_reading).ratio()
+                    # 短い語は読みが完全一致する場合のみ(偶然の一致を避ける)
+                    if ratio < (1.0 if len(term_reading) <= 3 else 0.75):
+                        continue
+                    # 「は異変」→「排便」のように、助詞などのひらがなで始まる区切りを漢字の用語にしない
+                    if HIRAGANA_START.search(surface_v) and not HIRAGANA_START.search(term):
+                        continue
+                    # 辞書にある普通の単語(読み変換で1語として扱われる「階段」「判断」「乾燥」等)は、
+                    # 読みが完全に同じ場合(「動機」→「動悸」)だけ置き換える。読みが少し違うだけでは
+                    # 「階段」→「改善」「判断」→「診断」のような誤った候補ばかりになるため
+                    if ratio < 1.0 and j == i and KANJI.search(surface_v):
+                        continue
+                    # 用語の一部になっている言葉(「心房細動」の「心房」)はそれ自体が正しい語なので、
+                    # 読みが少し違うだけの別の用語(「心臓」)に置き換えない。読みが完全一致する場合は残す
+                    if ratio < 1.0 and any(surface_v in w for w in term_set):
+                        continue
+                    found.append((starts[i], starts[i] + len(surface_v), surface_v, term, ratio))
 
     # 類似度の高い順に、重ならないものだけを残す(「腸鳴」と「腸鳴に」のような重複を除く)
     found.sort(key=lambda f: (-f[4], f[1] - f[0]))
