@@ -198,6 +198,24 @@ def apply_sound_match(hyp_text: str, ref: str, term_files: list):
     return fixed, len(matches), ok, wrong
 
 
+def read_text(path: str) -> str:
+    """正解の txt を読む。テキストエディットやWindowsで保存すると UTF-8 以外(Shift_JIS 等)に
+    なることがあるので、日本語でよく使われる文字コードを順に試す。"""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data.lstrip().startswith(b"{\\rtf"):
+        sys.exit(
+            f"{path} はリッチテキスト(RTF)で保存されています。テキストエディットで開き、"
+            "「フォーマット」→「標準テキストにする」を選んでから保存し直してください。"
+        )
+    for encoding in ("utf-8-sig", "cp932", "euc_jp", "utf-16"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    sys.exit(f"{path} の文字コードを判別できませんでした。UTF-8で保存し直してください。")
+
+
 def diff_lines(ref: str, hyp: str, context: int = 6) -> list:
     """正解と文字起こしが食い違う箇所を「正解 / 文字起こし」の形で並べる(前後の文字も付ける)。"""
     import difflib
@@ -266,8 +284,7 @@ def main() -> None:
                         fh.write(hyp_text)
                     print(f"  → 下書きを {ref_path} に書き出しました。正しく直してから再実行してください。")
                 continue
-            with open(ref_path, encoding="utf-8") as fh:
-                ref = normalize(fh.read())
+            ref = normalize(read_text(ref_path))
             hyp = normalize(hyp_text)
             in_ref, ok, missed = term_check(ref, hyp, terms)
             # 食い違う箇所の一覧(どの語がどう誤認識されたかを見るため)
