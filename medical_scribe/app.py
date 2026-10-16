@@ -61,6 +61,7 @@ import platform
 import re
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 
@@ -209,6 +210,7 @@ def generate_with_ollama(
             piece = msg.get("message", {}).get("content", "")
             parts.append(piece)
             if msg.get("done"):
+                record_ollama_stats(model_name, msg)
                 break
             # JSONモードでは、JSONを閉じた後も空白を上限まで出し続けることがあるため、
             # JSONとして完成した時点で受け取りを打ち切る(接続を閉じるとOllama側の生成も止まる)
@@ -216,6 +218,51 @@ def generate_with_ollama(
                 break
     # 新しいOllamaでは考えた過程は message["thinking"] に分かれて届くので、content だけを使う
     return strip_thinking("".join(parts))
+
+
+# Ollamaが処理の最後に返す内訳(読み込み・指示文の読み取り・書き出しの時間)を残しておき、
+# どこに時間がかかったかを画面に出せるようにする
+OLLAMA_STATS = []
+
+
+def record_ollama_stats(model_name: str, msg: dict) -> None:
+    ns = 1e9
+    OLLAMA_STATS.append(
+        {
+            "thread": threading.get_ident(),
+            "time": time.time(),
+            "model": model_name,
+            "load": msg.get("load_duration", 0) / ns,
+            "prompt_tokens": msg.get("prompt_eval_count", 0),
+            "prompt_sec": msg.get("prompt_eval_duration", 0) / ns,
+            "out_tokens": msg.get("eval_count", 0),
+            "out_sec": msg.get("eval_duration", 0) / ns,
+            "total": msg.get("total_duration", 0) / ns,
+        }
+    )
+    del OLLAMA_STATS[:-200]
+
+
+def collect_ollama_stats(since: float, thread_id: int) -> list:
+    return [x for x in OLLAMA_STATS if x["time"] >= since and x["thread"] == thread_id]
+
+
+def describe_ollama_stats(stats: list, wall_seconds: float) -> str:
+    """「抽出にかかった時間」の内訳。合計とOllamaの処理時間の差は、他の処理(④など)を待っていた時間。"""
+    if not stats:
+        return ""
+    load = sum(x["load"] for x in stats)
+    p_tok, p_sec = sum(x["prompt_tokens"] for x in stats), sum(x["prompt_sec"] for x in stats)
+    o_tok, o_sec = sum(x["out_tokens"] for x in stats), sum(x["out_sec"] for x in stats)
+    busy = sum(x["total"] for x in stats)
+    speed = f"・{o_tok / o_sec:.1f}トークン/秒" if o_sec else ""
+    text = (
+        f"内訳: モデルの読み込み {load:.0f}秒 / 指示文と会話の読み取り {p_sec:.0f}秒({p_tok}トークン)"
+        f" / 書き出し {o_sec:.0f}秒({o_tok}トークン{speed})"
+    )
+    if wall_seconds - busy > 10:
+        text += f" / 待ち時間 {wall_seconds - busy:.0f}秒(他の処理が終わるのを待っていた可能性)"
+    return text
 
 
 def is_complete_json(text: str) -> bool:
@@ -804,6 +851,7 @@ def start_background_findings(text: str, backend: str, api_key: str, local_model
             text, backend, api_key, local_model_path, progress=lambda i, n: job.update(progress=(i, n))
         )
         job["seconds"] = time.time() - job["start"]
+        job["stats"] = collect_ollama_stats(job["start"], threading.get_ident())
         return result
 
     job["future"] = findings_worker().submit(run)
@@ -1098,6 +1146,7 @@ def adopt_background_findings(job: dict) -> None:
     st.session_state.findings = job["future"].result()
     st.session_state.findings_source = job["source"]
     st.session_state.findings_seconds = job.get("seconds", 0)
+    st.session_state.findings_stats = job.get("stats", [])
     st.session_state.findings_run = st.session_state.get("findings_run", 0) + 1
     st.session_state.pop("bg_findings", None)
 
@@ -1574,13 +1623,19 @@ if uploaded_file:
                         ),
                     )
                     st.session_state.findings_seconds = time.time() - start
+                    st.session_state.findings_stats = collect_ollama_stats(start, threading.get_ident())
                     st.session_state.findings_source = reviewed_text
                     # 抽出し直したら、前回の入力・チェック状態を引き継がない
                     st.session_state.findings_run = st.session_state.get("findings_run", 0) + 1
 
             if "findings" in st.session_state:
                 if "findings_seconds" in st.session_state:
-                    st.caption(f"抽出にかかった時間: {st.session_state.findings_seconds:.0f}秒({local_model_path or llm_backend})")
+                    st.caption(
+                        f"抽出にかかった時間: {st.session_state.findings_seconds:.0f}秒({local_model_path or llm_backend})　"
+                        + describe_ollama_stats(
+                            st.session_state.get("findings_stats", []), st.session_state.findings_seconds
+                        )
+                    )
                 if st.session_state.get("findings_source", "").strip() != reviewed_text.strip():
                     st.warning(
                         "この所見は、②の直後の文章から抽出したものです。その後③の修正の採用や②の手直しで文章が"
