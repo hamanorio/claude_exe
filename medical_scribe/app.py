@@ -409,6 +409,35 @@ def mlx_worker():
     return ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-whisper")
 
 
+def release_mlx_whisper() -> None:
+    """文字起こしが終わったら、mlx-whisperのモデル(large-v3-turboで約1.5GB)をメモリから外す。
+    mlx-whisperはモデルを使い回すために持ち続けるが、16GBのMacでは②以降のQwen3(約9GB)と
+    合わせてメモリが足りなくなり、SSDを使うスワップで抽出が数倍遅くなるため。
+    次の文字起こしでは自動で読み込み直される(数秒)。MLXは同じスレッドで扱う必要があるので専用スレッドで行う。
+    """
+
+    def free():
+        holder = getattr(sys.modules.get("mlx_whisper.transcribe"), "ModelHolder", None)
+        if holder is not None:
+            holder.model = None
+            holder.model_path = None
+        import gc
+
+        gc.collect()
+        try:
+            import mlx.core as mx
+
+            clear = getattr(mx, "clear_cache", None) or mx.metal.clear_cache
+            clear()
+        except Exception:
+            pass
+
+    try:
+        mlx_worker().submit(free).result()
+    except Exception:
+        pass  # 解放できなくても文字起こしの結果には影響しない
+
+
 def transcribe(audio_path: str, medical_terms: str, model_size: str, engine: str = "openai-whisper"):
     initial_prompt = f"これは医師と患者の診察会話です。次のような医学用語が含まれます: {medical_terms}"
     if engine == "kotoba-whisper(日本語特化)":
@@ -1354,6 +1383,8 @@ if uploaded_file:
                     torch.mps.empty_cache()
             except Exception:
                 pass
+        elif whisper_engine == "mlx-whisper":
+            release_mlx_whisper()
         st.session_state.pop("corrected", None)
         st.session_state.pop("speaker_turns", None)
         st.session_state.pop("speaker_labeled_text_box", None)
