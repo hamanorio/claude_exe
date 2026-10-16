@@ -206,6 +206,9 @@ def generate_with_ollama(
         for line in res:
             if not line.strip():
                 continue
+            job = getattr(BACKGROUND_JOB, "job", None)
+            if job is not None and job.get("cancel"):
+                raise BackgroundCancelled()  # 接続を閉じるとOllama側の生成も止まり、③にすぐ順番が回る
             msg = json.loads(line.decode("utf-8"))
             piece = msg.get("message", {}).get("content", "")
             parts.append(piece)
@@ -218,6 +221,14 @@ def generate_with_ollama(
                 break
     # 新しいOllamaでは考えた過程は message["thinking"] に分かれて届くので、content だけを使う
     return strip_thinking("".join(parts))
+
+
+# 裏で動いている⑤の抽出(スレッドごと)。止める指示が出たら、Ollamaからの受け取りを途中で打ち切る
+BACKGROUND_JOB = threading.local()
+
+
+class BackgroundCancelled(Exception):
+    pass
 
 
 # Ollamaが処理の最後に返す内訳(読み込み・指示文の読み取り・書き出しの時間)を残しておき、
@@ -830,6 +841,13 @@ def extract_structured_findings(text: str, backend: str, api_key: str, local_mod
     return merged
 
 
+def cancel_background_findings() -> None:
+    """裏の⑤の抽出を止める(今のブロックが終わった時点で止まる)。"""
+    job = st.session_state.pop("bg_findings", None)
+    if job:
+        job["cancel"] = True
+
+
 @st.cache_resource
 def findings_worker():
     """⑤の所見抽出を裏で動かすためのスレッド(1本)。"""
@@ -844,12 +862,20 @@ def start_background_findings(text: str, backend: str, api_key: str, local_model
     """
     job = {"source": text, "start": time.time(), "progress": (0, 0), "model": local_model_path or backend}
 
+    def on_progress(i, n):
+        # 止める指示が出ていれば、次のブロックに進む前に終える(③のLLM補正とOllamaを取り合わないように)
+        if job.get("cancel"):
+            raise BackgroundCancelled()
+        job["progress"] = (i, n)
+
     def run():
-        if backend == "ローカル(Ollama・Mac向け)":
-            unload_all_ollama(keep=local_model_path)  # ⑧のモデル等が残っているとメモリ不足で遅くなる
-        result = extract_structured_findings(
-            text, backend, api_key, local_model_path, progress=lambda i, n: job.update(progress=(i, n))
-        )
+        BACKGROUND_JOB.job = job
+        try:
+            if backend == "ローカル(Ollama・Mac向け)":
+                unload_all_ollama(keep=local_model_path)  # ⑧のモデル等が残っているとメモリ不足で遅くなる
+            result = extract_structured_findings(text, backend, api_key, local_model_path, progress=on_progress)
+        finally:
+            BACKGROUND_JOB.job = None
         job["seconds"] = time.time() - job["start"]
         job["stats"] = collect_ollama_stats(job["start"], threading.get_ident())
         return result
@@ -1155,8 +1181,8 @@ def background_findings_status(job: dict) -> None:
     done_n, total_n = job["progress"]
     blocks = f"{done_n}/{total_n} ブロック完了・" if total_n else ""
     st.info(
-        f"⏳ ②の文章から、裏で所見を抽出しています({blocks}{time.time() - job['start']:.0f}秒経過)。"
-        "③④を見ている間に進みます。終わるとここに結果が出ます。"
+        f"⏳ 裏で所見を抽出しています({blocks}{time.time() - job['start']:.0f}秒経過)。"
+        "③の採用・却下や④を見ている間に進みます。終わるとここに結果が出ます。"
     )
 
 
@@ -1291,9 +1317,10 @@ with st.sidebar:
     )
     st.divider()
     auto_findings = st.checkbox(
-        "②の後で⑤の所見抽出を自動で始める",
+        "③の後で⑤の所見抽出を自動で始める",
         value=True,
-        help="②が終わった時点で、②の文章から⑤の抽出を裏で始めます。③④を見ている間に進むので、⑤で待つ時間が減ります。"
+        help="③をスキップした時点、または③のLLM補正が終わった時点で、⑤の抽出を裏で始めます。"
+        "③の採用・却下や④を見ている間に進むので、⑤で待つ時間が減ります。"
         "③で修正を採用した場合などは、⑤で抽出し直せます。",
     )
     enable_diarization = st.checkbox("話者分離を行う(医師/患者の区別)")
@@ -1470,10 +1497,7 @@ if uploaded_file:
                     st.session_state.speaker_labeled_text_box = infer_speakers_from_text(
                         dict_segments, llm_backend, api_key, local_model_path
                     )
-                if auto_findings:
-                    st.session_state.bg_findings = start_background_findings(
-                        st.session_state.speaker_labeled_text_box, llm_backend, api_key, local_model_path
-                    )
+                cancel_background_findings()  # 話者が変わったので、前の文章での抽出は使わない
 
         if dict_applied:
             st.caption(
@@ -1501,10 +1525,16 @@ if uploaded_file:
             st.session_state.corrected = text_for_correction
             st.session_state.correction_base = text_for_correction
             st.session_state.correction_run = st.session_state.get("correction_run", 0) + 1
+            if auto_findings and backend_ready:
+                cancel_background_findings()
+                st.session_state.bg_findings = start_background_findings(
+                    text_for_correction, llm_backend, api_key, local_model_path
+                )
         if st.button("LLMで補正を実行"):
             if not backend_ready:
                 st.error(backend_error)
             else:
+                cancel_background_findings()  # ③と⑤が同時に同じモデルを使うと、どちらも遅くなる
                 with st.spinner("補正中..."):
                     bar = st.progress(0.0, text="補正中...")
                     st.session_state.corrected = correct_with_llm(
@@ -1520,6 +1550,11 @@ if uploaded_file:
                     st.session_state.correction_base = text_for_correction
                     # 新しい補正結果では採用・却下のチェックをやり直す
                     st.session_state.correction_run = st.session_state.get("correction_run", 0) + 1
+                if auto_findings:
+                    # 採用・却下を選んでいる間に⑤を進める(修正を採用した場合は⑤で抽出し直せる)
+                    st.session_state.bg_findings = start_background_findings(
+                        text_for_correction, llm_backend, api_key, local_model_path
+                    )
 
         if "corrected" in st.session_state:
             st.markdown(
@@ -1638,8 +1673,8 @@ if uploaded_file:
                     )
                 if st.session_state.get("findings_source", "").strip() != reviewed_text.strip():
                     st.warning(
-                        "この所見は、②の直後の文章から抽出したものです。その後③の修正の採用や②の手直しで文章が"
-                        "変わっています。反映させるには「重要所見を抽出する」で抽出し直してください。"
+                        "この所見は、③の修正を採用する前の文章から抽出したものです。その後③の修正の採用や②の手直しで"
+                        "文章が変わっています。反映させるには「重要所見を抽出する」で抽出し直してください。"
                     )
                 if not st.session_state.findings:
                     st.info("抽出できる重要所見が見つかりませんでした。")
