@@ -783,6 +783,33 @@ def extract_structured_findings(text: str, backend: str, api_key: str, local_mod
     return merged
 
 
+@st.cache_resource
+def findings_worker():
+    """⑤の所見抽出を裏で動かすためのスレッド(1本)。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="findings")
+
+
+def start_background_findings(text: str, backend: str, api_key: str, local_model_path: str) -> dict:
+    """②の直後に⑤の抽出を裏で始める。医師が③④を見ている間に進むので、⑤での待ち時間が減る。
+    裏のスレッドからは画面(st.*)を触らず、進み具合は辞書に書くだけにする。
+    """
+    job = {"source": text, "start": time.time(), "progress": (0, 0), "model": local_model_path or backend}
+
+    def run():
+        if backend == "ローカル(Ollama・Mac向け)":
+            unload_all_ollama(keep=local_model_path)  # ⑧のモデル等が残っているとメモリ不足で遅くなる
+        result = extract_structured_findings(
+            text, backend, api_key, local_model_path, progress=lambda i, n: job.update(progress=(i, n))
+        )
+        job["seconds"] = time.time() - job["start"]
+        return result
+
+    job["future"] = findings_worker().submit(run)
+    return job
+
+
 def extract_findings_chunk(text: str, backend: str, api_key: str, local_model_path: str) -> list:
     """自由文のカルテ下書きから、診断に直結する重要所見を構造化して抽出する。
     側性(左右)や所見の有無を、自由文に埋め込まず個別項目として扱うことで、
@@ -1066,6 +1093,52 @@ def findings_not_mentioned(findings: list, output: str) -> list:
     return missed
 
 
+def adopt_background_findings(job: dict) -> None:
+    """裏で終わった抽出結果を⑤の結果として使う(チェック欄は新しい結果用に作り直す)。"""
+    st.session_state.findings = job["future"].result()
+    st.session_state.findings_source = job["source"]
+    st.session_state.findings_seconds = job.get("seconds", 0)
+    st.session_state.findings_run = st.session_state.get("findings_run", 0) + 1
+    st.session_state.pop("bg_findings", None)
+
+
+def background_findings_status(job: dict) -> None:
+    done_n, total_n = job["progress"]
+    blocks = f"{done_n}/{total_n} ブロック完了・" if total_n else ""
+    st.info(
+        f"⏳ ②の文章から、裏で所見を抽出しています({blocks}{time.time() - job['start']:.0f}秒経過)。"
+        "③④を見ている間に進みます。終わるとここに結果が出ます。"
+    )
+
+
+def show_background_findings(reviewed_text: str) -> None:
+    """⑤の欄で、裏の抽出の進み具合を表示し、終わっていれば結果を取り込む。"""
+    job = st.session_state.get("bg_findings")
+    if not job:
+        return
+    future = job["future"]
+    if future.done():
+        if future.exception() is not None:
+            st.error(f"裏での所見抽出に失敗しました({future.exception()})。「重要所見を抽出する」で実行し直してください。")
+            st.session_state.pop("bg_findings", None)
+            return
+        adopt_background_findings(job)
+        return
+    if hasattr(st, "fragment"):
+        # この部分だけ数秒ごとに描き直して進み具合を更新し、終わったら画面全体を更新して結果を出す
+        @st.fragment(run_every=3)
+        def live_status():
+            current = st.session_state.get("bg_findings")
+            if not current or current["future"].done():
+                st.rerun()
+            background_findings_status(current)
+
+        live_status()
+    else:
+        background_findings_status(job)
+        st.button("進み具合を更新")
+
+
 # ---------------- UI ----------------
 
 st.title("🩺 診察音声 → カルテ下書き プロトタイプ")
@@ -1168,6 +1241,12 @@ with st.sidebar:
         "患者データを外に出さないため、⑧はMac上のOllamaでだけ動かします。",
     )
     st.divider()
+    auto_findings = st.checkbox(
+        "②の後で⑤の所見抽出を自動で始める",
+        value=True,
+        help="②が終わった時点で、②の文章から⑤の抽出を裏で始めます。③④を見ている間に進むので、⑤で待つ時間が減ります。"
+        "③で修正を採用した場合などは、⑤で抽出し直せます。",
+    )
     enable_diarization = st.checkbox("話者分離を行う(医師/患者の区別)")
     hf_token = st.text_input("Hugging Face トークン(話者分離用)", type="password") if enable_diarization else None
 
@@ -1203,6 +1282,7 @@ if uploaded_file:
         st.session_state.pop("speaker_turns", None)
         st.session_state.pop("speaker_labeled_text_box", None)
         st.session_state.pop("chart_draft", None)
+        st.session_state.pop("bg_findings", None)
 
         if enable_diarization:
             if not hf_token:
@@ -1341,6 +1421,10 @@ if uploaded_file:
                     st.session_state.speaker_labeled_text_box = infer_speakers_from_text(
                         dict_segments, llm_backend, api_key, local_model_path
                     )
+                if auto_findings:
+                    st.session_state.bg_findings = start_background_findings(
+                        st.session_state.speaker_labeled_text_box, llm_backend, api_key, local_model_path
+                    )
 
         if dict_applied:
             st.caption(
@@ -1469,10 +1553,13 @@ if uploaded_file:
                 "推測による埋め合わせ(confabulation)を避けます。"
             )
 
+            show_background_findings(reviewed_text)
+
             if st.button("重要所見を抽出する"):
                 if not backend_ready:
                     st.error(backend_error)
                 else:
+                    st.session_state.pop("bg_findings", None)  # 手動で抽出し直したら、裏の結果は使わない
                     if llm_backend == "ローカル(Ollama・Mac向け)":
                         unload_all_ollama(keep=local_model_path)  # ⑧のモデル等が残っているとメモリ不足で遅くなる
                     bar = st.progress(0.0, text="抽出中...")
@@ -1494,6 +1581,11 @@ if uploaded_file:
             if "findings" in st.session_state:
                 if "findings_seconds" in st.session_state:
                     st.caption(f"抽出にかかった時間: {st.session_state.findings_seconds:.0f}秒({local_model_path or llm_backend})")
+                if st.session_state.get("findings_source", "").strip() != reviewed_text.strip():
+                    st.warning(
+                        "この所見は、②の直後の文章から抽出したものです。その後③の修正の採用や②の手直しで文章が"
+                        "変わっています。反映させるには「重要所見を抽出する」で抽出し直してください。"
+                    )
                 if not st.session_state.findings:
                     st.info("抽出できる重要所見が見つかりませんでした。")
                 all_confirmed = True
