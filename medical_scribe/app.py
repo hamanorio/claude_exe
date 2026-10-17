@@ -1327,9 +1327,10 @@ with st.sidebar:
     elif llm_backend == "ローカル(Ollama・Mac向け)":
         local_model_path = st.text_input(
             "Ollamaのモデル名",
-            "qwen3:14b",
-            help="`ollama list` で表示される名前。初期値はQwen3 14B(`ollama pull qwen3:14b` で入手、約9GB)。"
-            "Swallow 8B を使う場合は swallow-8b と入力してください。"
+            "qwen3:8b",
+            help="`ollama list` で表示される名前。初期値はQwen3 8B(`ollama pull qwen3:8b` で入手、約5GB)。"
+            "16GBのMacでは14Bと所見の質が同等で、⑤の抽出が約1.7倍速かったため8Bにしている。"
+            "メモリの多いMacでは qwen3:14b、Swallow 8B を使う場合は swallow-8b と入力してください。"
             "Qwen3 は答える前に考える型のモデルですが、②〜⑤では考える機能を切って速く動かします。",
         )
         st.caption("⚠️ 事前にOllamaを起動しておいてください。16GBのMacでは他のアプリを閉じておくと安定します。")
