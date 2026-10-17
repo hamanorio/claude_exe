@@ -265,14 +265,16 @@ def describe_ollama_stats(stats: list, wall_seconds: float) -> str:
     load = sum(x["load"] for x in stats)
     p_tok, p_sec = sum(x["prompt_tokens"] for x in stats), sum(x["prompt_sec"] for x in stats)
     o_tok, o_sec = sum(x["out_tokens"] for x in stats), sum(x["out_sec"] for x in stats)
-    busy = sum(x["total"] for x in stats)
+    work = load + p_sec + o_sec
     speed = f"・{o_tok / o_sec:.1f}トークン/秒" if o_sec else ""
     text = (
         f"内訳: モデルの読み込み {load:.0f}秒 / 指示文と会話の読み取り {p_sec:.0f}秒({p_tok}トークン)"
         f" / 書き出し {o_sec:.0f}秒({o_tok}トークン{speed})"
     )
-    if wall_seconds - busy > 10:
-        text += f" / 待ち時間 {wall_seconds - busy:.0f}秒(他の処理が終わるのを待っていた可能性)"
+    # 合計から実際の処理時間を引いた残りは、Ollamaが他の処理(③④や別の画面からの依頼)を
+    # 終えるのを待っていた時間。Ollamaは同じモデルへの依頼を順番に(または速さを分け合って)処理する
+    if wall_seconds - work > 10:
+        text += f" / 待ち時間 {wall_seconds - work:.0f}秒(Ollamaが他の処理を終えるのを待っていた可能性)"
     return text
 
 
