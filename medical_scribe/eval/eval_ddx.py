@@ -91,10 +91,23 @@ def ask_openai(model: str, history: str, timeout: int = 900) -> str:
     return (data["choices"][0]["message"].get("content") or "").strip()
 
 
+# アプリ(app.py)と同じ条件で比べるため、考える型のモデルは初期設定で考える量を減らす
+# (Qwen3は考えない、GPT-OSSは最小)。--think を指定した場合はそちらを使う
+AUTO_THINK = {"qwen3": "false", "gpt-oss": "low"}
+
+
+def think_for(model: str, think: str) -> str:
+    if think != "auto":
+        return think
+    return next((v for prefix, v in AUTO_THINK.items() if model.lower().startswith(prefix)), "")
+
+
 def ask_model(model: str, history: str, args) -> str:
     if model.startswith("openai:"):
         return ask_openai(model[len("openai:") :], history)
-    return ask_ollama(model, history, num_ctx=args.num_ctx, num_predict=args.num_predict, think=args.think)
+    return ask_ollama(
+        model, history, num_ctx=args.num_ctx, num_predict=args.num_predict, think=think_for(model, args.think)
+    )
 
 
 def strip_thinking(text: str) -> str:
@@ -204,9 +217,10 @@ def main() -> None:
     )
     ap.add_argument(
         "--think",
-        default="",
-        choices=["", "true", "false", "low", "medium", "high"],
-        help="考える型のモデルの考える量。Qwen3は true/false、GPT-OSSは low/medium/high。指定しなければモデルの初期設定",
+        default="auto",
+        choices=["auto", "", "true", "false", "low", "medium", "high"],
+        help="考える型のモデルの考える量。auto(初期値)はアプリと同じく Qwen3=false、GPT-OSS=low。"
+        "Qwen3は true/false、GPT-OSSは low/medium/high で指定でき、\"\" はモデル任せ",
     )
     ap.add_argument("--out", default="eval_result.csv")
     args = ap.parse_args()
