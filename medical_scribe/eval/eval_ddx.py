@@ -18,6 +18,8 @@ NEJM形式の症例データ(JSON: [{"病歴": ..., "最終診断": ..., "鑑別
   考える型のモデル(Qwen3, GPT-OSS)は、考える分も出力の上限に含まれるので上限を増やします。
     python3 eval_ddx.py --data 症例.json --models qwen3:14b --num-predict 8192 --num-ctx 16384 --out result.csv
     python3 eval_ddx.py --data 症例.json --models gpt-oss:20b --think low --num-predict 8192 --num-ctx 16384 --out result.csv
+  アプリの⑧「チームで検討」(振り分け→専門医→反論→まとめ)と比べるときは、頭に team: を付けます。
+    python3 eval_ddx.py --data test_cases_20.json --models qwen3:8b team:qwen3:8b --n 20 --out team.csv
   ※ openai: のモデルには症例の文章が OpenAI(米国)に送られます。公開された症例や架空の症例だけに使い、
     実在の患者さんの情報は送らないでください。
 
@@ -102,9 +104,30 @@ def think_for(model: str, think: str) -> str:
     return next((v for prefix, v in AUTO_THINK.items() if model.lower().startswith(prefix)), "")
 
 
+def ask_team(model: str, history: str, args) -> str:
+    """アプリの⑧「チームで検討」と同じ4つの係の検討で解く(team:モデル名 のとき)。"""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    import ddx_agents
+
+    def llm(prompt, system):
+        return ask_ollama(
+            model,
+            "",
+            num_ctx=args.num_ctx,
+            num_predict=1024,
+            think=think_for(model, args.think),
+            system=system,
+            user=prompt,
+        )
+
+    return ddx_agents.team_as_text(ddx_agents.run_team(history, llm))
+
+
 def ask_model(model: str, history: str, args) -> str:
     if model.startswith("openai:"):
         return ask_openai(model[len("openai:") :], history)
+    if model.startswith("team:"):
+        return ask_team(model[len("team:") :], history, args)
     return ask_ollama(
         model, history, num_ctx=args.num_ctx, num_predict=args.num_predict, think=think_for(model, args.think)
     )
@@ -119,13 +142,20 @@ def strip_thinking(text: str) -> str:
 
 
 def ask_ollama(
-    model: str, history: str, timeout: int = 3600, num_ctx: int = 8192, num_predict: int = 1536, think: str = ""
+    model: str,
+    history: str,
+    timeout: int = 3600,
+    num_ctx: int = 8192,
+    num_predict: int = 1536,
+    think: str = "",
+    system: str = SYSTEM_PROMPT,
+    user: str = "",
 ) -> str:
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"'病歴': {history}"},  # 学習データと同じ形式
+            {"role": "system", "content": system},
+            {"role": "user", "content": user or f"'病歴': {history}"},  # 学習データと同じ形式
         ],
         "stream": False,
         "options": {"temperature": 0, "num_ctx": num_ctx, "num_predict": num_predict},
