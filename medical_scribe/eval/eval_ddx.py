@@ -22,6 +22,9 @@ NEJM形式の症例データ(JSON: [{"病歴": ..., "最終診断": ..., "鑑別
     python3 eval_ddx.py --data test_cases_20.json --models qwen3:8b team:qwen3:8b --n 20 --out team.csv
   病歴の前半だけを渡して難しくするときは --truncate 0.4 のように割合を指定します
   (決め手の検査結果などが伏せられ、強いモデルでも単独では迷う状況を作れます)。
+  逐次診断(病歴の前半だけを見て、AIが質問や検査を自分で依頼しながら診断に迫る)は seq: を付けます。
+    python3 eval_ddx.py --data 症例.json --models openai:gpt-5.6-luna seq:openai:gpt-5.6-luna \\
+        --seq-start 0.3 --seq-turns 8 --out seq.csv
   OpenAIのモデルでもチームにできます(team:openai:モデル名)。専門医の数は --team-departments で変えられます。
     python3 eval_ddx.py --data 症例.json --models openai:gpt-5.6-luna team:openai:gpt-5.6-luna --out team56.csv
   ※ openai: のモデルには症例の文章が OpenAI(米国)に送られます。公開された症例や架空の症例だけに使い、
@@ -108,10 +111,11 @@ def think_for(model: str, think: str) -> str:
     return next((v for prefix, v in AUTO_THINK.items() if model.lower().startswith(prefix)), "")
 
 
-def ask_team(model: str, history: str, args) -> str:
-    """アプリの⑧「チームで検討」と同じ4つの係の検討で解く(team:モデル名 のとき)。"""
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-    import ddx_agents
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # ddx_agents 等を読む
+
+
+def make_llm(model: str, args, num_predict: int = 1024):
+    """llm(prompt, system) -> str の形で、Ollama または OpenAI のモデルを呼ぶ関数を作る。"""
 
     def llm(prompt, system):
         if model.startswith("openai:"):
@@ -120,14 +124,37 @@ def ask_team(model: str, history: str, args) -> str:
             model,
             "",
             num_ctx=args.num_ctx,
-            num_predict=1024,
+            num_predict=num_predict,
             think=think_for(model, args.think),
             system=system,
             user=prompt,
         )
 
-    result = ddx_agents.run_team(history, llm, departments_limit=args.team_departments)
+    return llm
+
+
+def ask_team(model: str, history: str, args) -> str:
+    """アプリの⑧「チームで検討」と同じ4つの係の検討で解く(team:モデル名 のとき)。"""
+    import ddx_agents
+
+    result = ddx_agents.run_team(history, make_llm(model, args), departments_limit=args.team_departments)
     return ddx_agents.team_as_text(result)
+
+
+def ask_sequential(model: str, history: str, args) -> str:
+    """逐次診断(seq:モデル名 のとき): 病歴の前半だけを見た診断医AIが、情報係AIに質問や検査を
+    依頼しながら診断に迫る。情報係は --gatekeeper のモデル(省略時は同じモデル)が務める。"""
+    import sequential_dx
+
+    initial = truncate_history(history, args.seq_start)
+    result = sequential_dx.run_sequential(
+        initial,
+        history,
+        make_llm(model, args, num_predict=512),
+        make_llm(args.gatekeeper or model, args, num_predict=512),
+        max_turns=args.seq_turns,
+    )
+    return sequential_dx.sequential_as_text(result)
 
 
 def ask_model(model: str, history: str, args) -> str:
@@ -135,6 +162,8 @@ def ask_model(model: str, history: str, args) -> str:
         return ask_openai(model[len("openai:") :], history)
     if model.startswith("team:"):
         return ask_team(model[len("team:") :], history, args)
+    if model.startswith("seq:"):
+        return ask_sequential(model[len("seq:") :], history, args)
     return ask_ollama(
         model, history, num_ctx=args.num_ctx, num_predict=args.num_predict, think=think_for(model, args.think)
     )
@@ -277,13 +306,16 @@ def main() -> None:
         default=1.0,
         help="病歴の前から何割だけを渡すか(例: 0.4 で前半4割)。決め手の検査結果などを伏せて難しくする",
     )
+    ap.add_argument("--seq-start", type=float, default=0.3, help="seq: のとき、最初に見せる病歴の割合")
+    ap.add_argument("--seq-turns", type=int, default=8, help="seq: のとき、質問・検査を依頼できる最大回数")
+    ap.add_argument("--gatekeeper", default="", help="seq: のとき、症例の全文を持って答える情報係のモデル(省略時は同じ)")
     ap.add_argument(
         "--team-departments", type=int, default=2, help="team: のとき、意見を聞く専門医(診療科)の最大数"
     )
     ap.add_argument("--out", default="eval_result.csv")
     args = ap.parse_args()
 
-    if any("openai:" in m for m in args.models):
+    if any("openai:" in m for m in args.models + [args.gatekeeper]):
         if not os.environ.get("OPENAI_API_KEY"):
             sys.exit("openai: のモデルを使うには、先に export OPENAI_API_KEY=... を実行してください。")
         print("※ openai: のモデルには症例の文章がOpenAIに送られます(実在の患者情報は含めないでください)")
@@ -316,7 +348,9 @@ def main() -> None:
                 print(f"[{model}] {k}/{len(selected)} 症例{case['case_id']} …", end="", flush=True)
                 start = time.time()
                 try:
-                    output = ask_model(model, truncate_history(case["病歴"], args.truncate), args)
+                    # seq: は全文を情報係に渡し、最初に見せる割合は --seq-start で決める
+                    history = case["病歴"] if model.startswith("seq:") else truncate_history(case["病歴"], args.truncate)
+                    output = ask_model(model, history, args)
                 except Exception as e:  # 1件の失敗で全体を止めない
                     output = f"(エラー: {e})"
                 final = extract_final(output)
