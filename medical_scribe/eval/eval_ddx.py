@@ -20,6 +20,8 @@ NEJM形式の症例データ(JSON: [{"病歴": ..., "最終診断": ..., "鑑別
     python3 eval_ddx.py --data 症例.json --models gpt-oss:20b --think low --num-predict 8192 --num-ctx 16384 --out result.csv
   アプリの⑧「チームで検討」(振り分け→専門医→反論→まとめ)と比べるときは、頭に team: を付けます。
     python3 eval_ddx.py --data test_cases_20.json --models qwen3:8b team:qwen3:8b --n 20 --out team.csv
+  病歴の前半だけを渡して難しくするときは --truncate 0.4 のように割合を指定します
+  (決め手の検査結果などが伏せられ、強いモデルでも単独では迷う状況を作れます)。
   OpenAIのモデルでもチームにできます(team:openai:モデル名)。専門医の数は --team-departments で変えられます。
     python3 eval_ddx.py --data 症例.json --models openai:gpt-5.6-luna team:openai:gpt-5.6-luna --out team56.csv
   ※ openai: のモデルには症例の文章が OpenAI(米国)に送られます。公開された症例や架空の症例だけに使い、
@@ -181,6 +183,18 @@ def ask_ollama(
     return strip_thinking(message.get("content", ""))
 
 
+def truncate_history(history: str, fraction: float) -> str:
+    """病歴の前から fraction の割合だけを残す(文の途中で切らないよう、直前の句点で切る)。
+    NEJMの症例は、初診時の訴え → 診察 → 検査 → 経過 の順に書かれていることが多いので、
+    前半だけを渡すと、決め手になる検査結果を伏せた「情報が少ない段階」の症例になる。
+    """
+    if fraction >= 1.0:
+        return history
+    cut = max(1, int(len(history) * fraction))
+    end = max(history.rfind(p, 0, cut) for p in "。．.")
+    return history[: end + 1] if end > cut * 0.5 else history[:cut]
+
+
 def normalize(text: str) -> str:
     """比較用に、空白・記号・括弧内の補足・「〜の疑い」などを取り除く。"""
     text = re.sub(r"[（(][^）)]*[）)]", "", text)
@@ -258,6 +272,12 @@ def main() -> None:
         "Qwen3は true/false、GPT-OSSは low/medium/high で指定でき、\"\" はモデル任せ",
     )
     ap.add_argument(
+        "--truncate",
+        type=float,
+        default=1.0,
+        help="病歴の前から何割だけを渡すか(例: 0.4 で前半4割)。決め手の検査結果などを伏せて難しくする",
+    )
+    ap.add_argument(
         "--team-departments", type=int, default=2, help="team: のとき、意見を聞く専門医(診療科)の最大数"
     )
     ap.add_argument("--out", default="eval_result.csv")
@@ -296,7 +316,7 @@ def main() -> None:
                 print(f"[{model}] {k}/{len(selected)} 症例{case['case_id']} …", end="", flush=True)
                 start = time.time()
                 try:
-                    output = ask_model(model, case["病歴"], args)
+                    output = ask_model(model, truncate_history(case["病歴"], args.truncate), args)
                 except Exception as e:  # 1件の失敗で全体を止めない
                     output = f"(エラー: {e})"
                 final = extract_final(output)
