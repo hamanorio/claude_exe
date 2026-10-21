@@ -20,6 +20,8 @@ NEJM形式の症例データ(JSON: [{"病歴": ..., "最終診断": ..., "鑑別
     python3 eval_ddx.py --data 症例.json --models gpt-oss:20b --think low --num-predict 8192 --num-ctx 16384 --out result.csv
   アプリの⑧「チームで検討」(振り分け→専門医→反論→まとめ)と比べるときは、頭に team: を付けます。
     python3 eval_ddx.py --data test_cases_20.json --models qwen3:8b team:qwen3:8b --n 20 --out team.csv
+  OpenAIのモデルでもチームにできます(team:openai:モデル名)。専門医の数は --team-departments で変えられます。
+    python3 eval_ddx.py --data 症例.json --models openai:gpt-5.6-luna team:openai:gpt-5.6-luna --out team56.csv
   ※ openai: のモデルには症例の文章が OpenAI(米国)に送られます。公開された症例や架空の症例だけに使い、
     実在の患者さんの情報は送らないでください。
 
@@ -66,7 +68,7 @@ def load_cases(path: str) -> list:
     return cases
 
 
-def ask_openai(model: str, history: str, timeout: int = 900) -> str:
+def ask_openai(model: str, history: str, timeout: int = 900, system: str = SYSTEM_PROMPT, user: str = "") -> str:
     """OpenAIのAPIで同じ症例を解かせる(比較用)。推論型のモデルは temperature を指定できないので指定しない。"""
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
@@ -74,8 +76,8 @@ def ask_openai(model: str, history: str, timeout: int = 900) -> str:
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"'病歴': {history}"},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user or f"'病歴': {history}"},
         ],
         # 推論型のモデルは、内部の思考にもこの上限を使うので大きめにする
         "max_completion_tokens": 16000,
@@ -110,6 +112,8 @@ def ask_team(model: str, history: str, args) -> str:
     import ddx_agents
 
     def llm(prompt, system):
+        if model.startswith("openai:"):
+            return ask_openai(model[len("openai:") :], "", system=system, user=prompt)
         return ask_ollama(
             model,
             "",
@@ -120,7 +124,8 @@ def ask_team(model: str, history: str, args) -> str:
             user=prompt,
         )
 
-    return ddx_agents.team_as_text(ddx_agents.run_team(history, llm))
+    result = ddx_agents.run_team(history, llm, departments_limit=args.team_departments)
+    return ddx_agents.team_as_text(result)
 
 
 def ask_model(model: str, history: str, args) -> str:
@@ -252,10 +257,13 @@ def main() -> None:
         help="考える型のモデルの考える量。auto(初期値)はアプリと同じく Qwen3=false、GPT-OSS=low。"
         "Qwen3は true/false、GPT-OSSは low/medium/high で指定でき、\"\" はモデル任せ",
     )
+    ap.add_argument(
+        "--team-departments", type=int, default=2, help="team: のとき、意見を聞く専門医(診療科)の最大数"
+    )
     ap.add_argument("--out", default="eval_result.csv")
     args = ap.parse_args()
 
-    if any(m.startswith("openai:") for m in args.models):
+    if any("openai:" in m for m in args.models):
         if not os.environ.get("OPENAI_API_KEY"):
             sys.exit("openai: のモデルを使うには、先に export OPENAI_API_KEY=... を実行してください。")
         print("※ openai: のモデルには症例の文章がOpenAIに送られます(実在の患者情報は含めないでください)")
@@ -298,7 +306,10 @@ def main() -> None:
                     "gold": case["最終診断"],
                     "predicted_final": final,
                     "final_match": "○" if is_match(case["最終診断"], final) else "要目視",
-                    "gold_in_output": "○" if normalize(case["最終診断"]) in normalize(output) else "要目視",
+                    # チームの出力は各係の検討の記録も含むので、記録より前(まとめの鑑別)だけで判定する
+                    "gold_in_output": "○"
+                    if normalize(case["最終診断"]) in normalize(output.split("## 検討の記録")[0])
+                    else "要目視",
                     "seconds": round(time.time() - start, 1),
                     "output": output,
                 }
