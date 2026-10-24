@@ -10,7 +10,8 @@
      → Claudeが判断「もう答えられる」     → 回答
 ```
 
-- `search_location` / `get_weather` … ふつうのPython関数（ツール）
+- `search_location` / `get_weather` / `suggest_outfit` … ふつうのPython関数（ツール）
+  - `suggest_outfit` は気温・降水確率・風速から服装と持ち物を提案します（「明日何着ていけばいい？」など）
 - `TOOLS` … ツールの説明書。Claudeはこれを読んで使うツールを選ぶ
 - `ask()` … ツールを実行してClaudeに結果を返すループ
 
@@ -30,5 +31,5 @@ python weather_agent.py                         # 対話モード（exit で終�
 ## 改造のヒント
 
 - ツールを追加する：関数を書き、`TOOL_FUNCTIONS` と `TOOLS` に登録するだけ
-  （例：服装の提案、週間の気温グラフ作成など）
+  （例：週間の気温グラフ作成など）
 - 口調や回答の形式を変える：`SYSTEM_PROMPT` を書き換える

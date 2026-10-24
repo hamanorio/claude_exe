@@ -73,7 +73,7 @@ def get_weather(latitude: float, longitude: float, days: int = 3) -> dict:
             "latitude": latitude,
             "longitude": longitude,
             "current": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m",
-            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max",
             "timezone": "auto",
             "forecast_days": days,
         },
@@ -95,15 +95,53 @@ def get_weather(latitude: float, longitude: float, days: int = 3) -> dict:
                 "max_c": daily["temperature_2m_max"][i],
                 "min_c": daily["temperature_2m_min"][i],
                 "precipitation_probability_percent": daily["precipitation_probability_max"][i],
+                "max_wind_speed_kmh": daily["wind_speed_10m_max"][i],
             }
             for i in range(len(daily["time"]))
         ],
     }
 
 
+def suggest_outfit(max_c: float, min_c: float, precipitation_probability_percent: float,
+                   wind_speed_kmh: float) -> dict:
+    """気温・降水確率・風速から服装と持ち物を提案する"""
+    # 1日の平均的な体感で服装を決め、朝晩の冷え込みは羽織りもので補う
+    avg = (max_c + min_c) / 2
+    if wind_speed_kmh >= 30:
+        avg -= 2  # 強い風は体感温度を下げる
+
+    if avg >= 25:
+        clothes = ["半袖", "通気性のよい薄手の服"]
+    elif avg >= 20:
+        clothes = ["半袖または薄手の長袖"]
+    elif avg >= 16:
+        clothes = ["長袖シャツ", "薄手のカーディガン"]
+    elif avg >= 12:
+        clothes = ["長袖", "セーターまたはパーカー", "薄手のジャケット"]
+    elif avg >= 7:
+        clothes = ["ニット", "コート"]
+    else:
+        clothes = ["厚手のコートまたはダウン", "マフラー", "手袋"]
+
+    items = []
+    if precipitation_probability_percent >= 50:
+        items.append("傘")
+    elif precipitation_probability_percent >= 30:
+        items.append("折りたたみ傘")
+    if max_c - min_c >= 10:
+        items.append("脱ぎ着しやすい羽織りもの(寒暖差が大きい)")
+    if max_c >= 30:
+        items.extend(["帽子", "飲み物(熱中症対策)"])
+    if wind_speed_kmh >= 30:
+        items.append("風を通しにくい上着")
+
+    return {"clothes": clothes, "items": items}
+
+
 TOOL_FUNCTIONS = {
     "search_location": search_location,
     "get_weather": get_weather,
+    "suggest_outfit": suggest_outfit,
 }
 
 
@@ -140,12 +178,32 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "suggest_outfit",
+        "description": (
+            "その日の最高・最低気温、降水確率、風速から、おすすめの服装と持ち物(傘など)を提案する。"
+            "get_weather で天気を調べた後、服装や持ち物を聞かれたときに使う。"
+        ),
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "max_c": {"type": "number", "description": "最高気温(℃)"},
+                "min_c": {"type": "number", "description": "最低気温(℃)"},
+                "precipitation_probability_percent": {"type": "number", "description": "降水確率(%)"},
+                "wind_speed_kmh": {"type": "number", "description": "風速(km/h)。分からなければ 0"},
+            },
+            "required": ["max_c", "min_c", "precipitation_probability_percent", "wind_speed_kmh"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 SYSTEM_PROMPT = (
     "あなたは天気を案内するアシスタントです。"
     "天気の質問には、必ずツールで最新データを調べてから答えてください。"
     "場所の座標が分からないときは search_location で調べ、その後 get_weather を使います。"
+    "服装や持ち物を聞かれたら、get_weather の結果を使って suggest_outfit で提案を作ります。"
     "回答は日本語で、簡潔に、服装や傘の要否などのひとことアドバイスを添えてください。"
 )
 
