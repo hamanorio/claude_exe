@@ -1,6 +1,11 @@
 """
-⑧ チームでの検討(試験的): 振り分け係 → 専門医係 → 反論係 → まとめ係 の順に、
-同じLLMに役割を変えて検討させ、鑑別診断の参考を作る。
+⑧ 危険な兆候と振り分け、およびチームでの検討。
+
+- アプリ(app.py)が使うのは run_triage(キーワードによる危険な兆候の確認 + 振り分け係)だけ。
+  小型モデル(qwen3:8b)では、チームで議論させても鑑別の正答率が上がらなかったため
+  (持っていない知識は議論しても出てこない)、診断能力に頼らない部分に絞った。
+- run_team(振り分け係 → 専門医係 → 反論係 → まとめ係)は、評価スクリプトで
+  大きなモデルと比べる研究用に残している。
 
 - 診断を下すものではなく、医師が見落としを確かめるための参考情報。
 - 危険な兆候は、LLMの判断とは別に、キーワードでも機械的に確認する(LLMの見落としに備える)。
@@ -172,6 +177,16 @@ def parse_table(text: str, min_cells: int) -> list:
 
 
 # ---------- 本体 ----------
+
+
+def run_triage(history: str, llm, departments_limit: int = 2) -> dict:
+    """アプリの⑧で使う: キーワードによる危険な兆候の確認と、振り分け係(LLM 1回)だけを行う。"""
+    triage_raw = llm(triage_prompt(history), TRIAGE_SYSTEM)
+    return {
+        "rule_flags": rule_red_flags(history),
+        "triage": parse_triage(triage_raw, departments_limit),
+        "triage_raw": triage_raw,
+    }
 
 
 def run_team(history: str, llm, progress=None, departments_limit: int = 2) -> dict:

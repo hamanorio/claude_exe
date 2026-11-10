@@ -1246,14 +1246,23 @@ def show_background_findings(reviewed_text: str) -> None:
         st.button("進み具合を更新")
 
 
-def show_team_review(history, confirmed_findings, llm_backend, api_key, local_model_path, backend_ready):
-    """⑧の続き: 振り分け係→専門医係→反論係→まとめ係 の順に、同じモデルに役割を変えて検討させる。"""
-    st.markdown("#### チームで検討(試験的)")
+def show_triage(history, llm_backend, api_key, local_model_path, backend_ready):
+    """⑧の続き: 危険な兆候(キーワード・LLMを使わない)と、振り分け係による緊急度・診療科。
+    小型モデルでは鑑別の議論(専門医係・反論係・まとめ係)をしても正答率が上がらなかったので、
+    診断能力に頼らないこの2つに絞っている。"""
+    st.markdown("#### 危険な兆候と振り分け")
+
+    # キーワードの確認はLLMを使わず一瞬で終わるので、病歴の欄が変わるたびに常に表示する
+    rule_flags = ddx_agents.rule_red_flags(history)
+    if rule_flags:
+        st.error("⚠ 危険な兆候の可能性(キーワードで検出・誤検出もあり): " + "、".join(rule_flags))
+    elif history.strip():
+        st.caption("キーワードによる確認では、危険な兆候は見つかりませんでした(見落としがないとは限りません)。")
+
     st.caption(
-        f"振り分け係 → 専門医係(最大2診療科) → 反論係 → まとめ係 の順に、{local_model_path or llm_backend} が役割を"
-        "変えて検討します。LLMを5回ほど呼ぶので数分かかります。危険な兆候はLLMとは別にキーワードでも確認します。"
+        f"振り分け係として {local_model_path or llm_backend} が、緊急度と関係する診療科を判断します(LLMを1回呼びます)。"
     )
-    if st.button("チームで検討する"):
+    if st.button("緊急度と診療科を判断する"):
         if not history.strip():
             st.error("病歴が空です。⑤で所見を確認するか、上の欄に入力してください。")
             return
@@ -1265,74 +1274,35 @@ def show_team_review(history, confirmed_findings, llm_backend, api_key, local_mo
 
         def llm(prompt, system):
             if llm_backend == "ローカル(Ollama・Mac向け)":
-                return generate_with_ollama(prompt, local_model_path, system=system, max_tokens=1024)
+                return generate_with_ollama(prompt, local_model_path, system=system, max_tokens=512)
             return run_llm(f"{system}\n\n{prompt}", llm_backend, api_key, local_model_path)
 
-        bar = st.progress(0.0, text="検討中...")
         start = time.time()
-        try:
-            st.session_state.team_result = ddx_agents.run_team(
-                history,
-                llm,
-                progress=lambda name, i, n: bar.progress(
-                    i / n, text=f"{name}が検討中...({i}/{n}・{time.time() - start:.0f}秒経過)"
-                ),
-            )
-            st.session_state.team_history = history
-            st.session_state.team_seconds = time.time() - start
-        except Exception as e:
-            st.error(f"検討の途中でエラーになりました({e})。Ollamaが起動しているか確認してください。")
-        bar.empty()
+        with st.spinner("振り分け係が判断しています..."):
+            try:
+                st.session_state.triage_result = ddx_agents.run_triage(history, llm)
+                st.session_state.triage_history = history
+                st.session_state.triage_seconds = time.time() - start
+            except Exception as e:
+                st.error(f"判断の途中でエラーになりました({e})。Ollamaが起動しているか確認してください。")
 
-    result = st.session_state.get("team_result")
+    result = st.session_state.get("triage_result")
     if not result:
         return
-    used_history = st.session_state.get("team_history", "")
-    if used_history != history:
-        st.caption("⚠️ 病歴の欄が、この検討をしたときから変わっています。もう一度ボタンを押してください。")
-
-    if result["rule_flags"]:
-        st.error("⚠ 危険な兆候の可能性(キーワードで検出・誤検出もあり): " + "、".join(result["rule_flags"]))
+    if st.session_state.get("triage_history", "") != history:
+        st.caption("⚠️ 病歴の欄が、この判断をしたときから変わっています。もう一度ボタンを押してください。")
     triage = result["triage"]
     st.markdown(
-        f"**振り分け係**: 緊急度 **{triage['urgency'] or '読み取れず'}** / 診療科 {'、'.join(triage['departments'])}"
-        f" / 危険な兆候 {md_escape('、'.join(triage['flags'])) or 'なし'}"
+        f"**緊急度**: **{triage['urgency'] or '読み取れず'}** / "
+        f"**診療科**: {'、'.join(triage['departments']) or '読み取れず'} / "
+        f"**LLMが挙げた危険な兆候**: {md_escape('、'.join(triage['flags'])) or 'なし'}"
     )
     if triage["reason"]:
         st.caption(f"理由: {md_escape(triage['reason'])}")
-
-    final = ddx_agents.final_table(result)
-    if final:
-        st.markdown("**まとめ係の鑑別(参考)**")
-        st.table(final)
-    else:
-        st.caption("まとめ係の出力を表として読み取れませんでした。下の検討の記録を見てください。")
-    if result["critique"]:
-        st.markdown("**反論係の指摘**")
-        for cells in result["critique"]:
-            st.markdown("・" + md_escape("｜".join(cells)))
-
-    text = ddx_agents.all_text(result)
-    unsupported = find_unsupported_terms(text, used_history)
-    if unsupported:
-        st.markdown(":orange[⚠ 病歴に無い数値・検査名]: " + "、".join(md_escape(t) for t in unsupported[:30]))
-        st.caption("追加検査の提案として挙げたものか、根拠として作り出したものです。根拠に使われていないか確認してください。")
-    missed = findings_not_mentioned(confirmed_findings, text)
-    if missed:
-        st.markdown(":orange[⚠ 検討で触れられていない確認済み所見]: " + "、".join(md_escape(m) for m in missed))
-
-    with st.expander("専門医係の意見"):
-        for sp in result["specialists"]:
-            st.markdown(f"**{sp['department']}**")
-            table = ddx_agents.specialist_table(sp)
-            if table:
-                st.table(table)
-            else:
-                st.text(sp["raw"])
-    with st.expander("検討の記録(各係の出力全文)"):
-        st.text(text)
-    if "team_seconds" in st.session_state:
-        st.caption(f"検討にかかった時間: {st.session_state.team_seconds:.0f}秒")
+    with st.expander("振り分け係の出力全文"):
+        st.text(result["triage_raw"])
+    if "triage_seconds" in st.session_state:
+        st.caption(f"判断にかかった時間: {st.session_state.triage_seconds:.0f}秒")
 
 
 # ---------------- UI ----------------
@@ -1986,6 +1956,6 @@ if uploaded_file:
                     with st.expander("モデルの出力全文"):
                         st.text(output)
 
-                show_team_review(history, confirmed_findings, llm_backend, api_key, local_model_path, backend_ready)
+                show_triage(history, llm_backend, api_key, local_model_path, backend_ready)
 else:
     st.info("まずは音声ファイル(mp3/wav/m4a)をアップロードしてください。")

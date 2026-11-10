@@ -18,7 +18,7 @@ NEJM形式の症例データ(JSON: [{"病歴": ..., "最終診断": ..., "鑑別
   考える型のモデル(Qwen3, GPT-OSS)は、考える分も出力の上限に含まれるので上限を増やします。
     python3 eval_ddx.py --data 症例.json --models qwen3:14b --num-predict 8192 --num-ctx 16384 --out result.csv
     python3 eval_ddx.py --data 症例.json --models gpt-oss:20b --think low --num-predict 8192 --num-ctx 16384 --out result.csv
-  アプリの⑧「チームで検討」(振り分け→専門医→反論→まとめ)と比べるときは、頭に team: を付けます。
+  チームでの検討(振り分け→専門医→反論→まとめ。研究用で、アプリでは使っていません)と比べるときは、頭に team: を付けます。
     python3 eval_ddx.py --data test_cases_20.json --models qwen3:8b team:qwen3:8b --n 20 --out team.csv
   病歴の前半だけを渡して難しくするときは --truncate 0.4 のように割合を指定します
   (決め手の検査結果などが伏せられ、強いモデルでも単独では迷う状況を作れます)。
@@ -134,7 +134,7 @@ def make_llm(model: str, args, num_predict: int = 1024):
 
 
 def ask_team(model: str, history: str, args) -> str:
-    """アプリの⑧「チームで検討」と同じ4つの係の検討で解く(team:モデル名 のとき)。"""
+    """ddx_agents.run_team の4つの係の検討で解く(team:モデル名 のとき)。"""
     import ddx_agents
 
     result = ddx_agents.run_team(history, make_llm(model, args), departments_limit=args.team_departments)
