@@ -64,6 +64,8 @@ Both tables have RLS enabled with a public `SELECT` policy.
 Browser-based editor for blog posts — add / edit / delete posts and upload images without opening the Supabase dashboard. Not linked from the site nav (`noindex`); open `admin.html` directly.
 
 - Login: Supabase Auth email/password (user created once in the dashboard). Session persists in the browser.
+- `admin.html` creates its own session-persisting client. The shared `db` in `js/supabase.js` is created with `persistSession: false` so public pages always query as `anon` — otherwise, after logging in on the admin page, every page would query as `authenticated`, and tables whose SELECT policy only targets `anon` (e.g. `projects`) would return nothing.
+- `js/main.js` toggles the mobile hamburger menu (`.nav-links.active`).
 - Write permission: RLS policies on `posts` and `storage.objects` (bucket `0505`) allow insert/update/delete only when `public.is_admin()` is true, i.e. the user's id is in `public.admins`. One-time setup SQL: `setup/admin-setup.sql`.
 - Images are resized client-side (max 1600px) and uploaded with generated ASCII filenames; deleting a post also deletes its images.
 - New-post drafts autosave to `localStorage`.
