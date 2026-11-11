@@ -6,6 +6,7 @@ eval_ddx.py の結果(CSV)をターミナルで見やすく表示する。
 """
 
 import argparse
+import sys
 import csv
 from collections import OrderedDict
 
@@ -23,7 +24,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("csv_path")
     ap.add_argument("--case", help="この症例番号の出力全文を表示する")
-    args = ap.parse_args()
+    # 「--case　1」のように全角スペースで区切られていても読めるようにする
+    argv = [part for a in sys.argv[1:] for part in a.replace("\u3000", " ").split()]
+    args = ap.parse_args(argv)
 
     with open(args.csv_path, encoding="utf-8-sig") as fh:
         rows = latest_rows(list(csv.DictReader(fh)))

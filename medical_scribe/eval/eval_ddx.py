@@ -330,6 +330,8 @@ def main() -> None:
     random.Random(args.seed).shuffle(pool)
     selected = pool[: args.n]
 
+    check_ollama(args.models)
+
     done = set()
     if os.path.exists(args.out):
         with open(args.out, encoding="utf-8-sig") as fh:
@@ -369,9 +371,44 @@ def main() -> None:
                 }
                 writer.writerow(row)
                 fh.flush()
-                print(f" {row['seconds']}秒 最終診断:{row['final_match']}")
+                if output.startswith("(エラー:"):
+                    print(f" {output[:300]}")  # 原因が分かるよう、エラーの内容をそのまま出す
+                else:
+                    print(f" {row['seconds']}秒 最終診断:{row['final_match']}")
 
     summarize(args.out, args.models)
+
+
+def check_ollama(models: list) -> None:
+    """実行前に、Ollamaが起動しているか・指定したモデルが入っているかを確かめる。
+    (起動していないと全症例が一瞬でエラーになり、原因が分かりにくいため)"""
+    local = []
+    for m in models:
+        m = re.sub(r"^(team|seq):", "", m)
+        if not m.startswith("openai:"):
+            local.append(m)
+    if not local:
+        return
+    try:
+        with urllib.request.urlopen(OLLAMA_URL.replace("/api/chat", "/api/tags"), timeout=10) as res:
+            names = [x["name"] for x in json.loads(res.read().decode("utf-8")).get("models", [])]
+    except Exception as e:
+        sys.exit(
+            f"Ollamaに接続できません({e})。\n"
+            "Ollamaのアプリを起動するか、別のターミナルで `ollama serve` を実行してから、もう一度実行してください。"
+        )
+    # 「qwen3:8b」と「qwen3:8b」、タグなしの「swallow-8b-nejm」と「swallow-8b-nejm:latest」を同じとみなす
+    have = set(names) | {n.removesuffix(":latest") for n in names}
+    missing = [m for m in dict.fromkeys(local) if m not in have and m.removesuffix(":latest") not in have]
+    if missing:
+        lines = [f"次のモデルがOllamaに入っていません: {'、'.join(missing)}", "入れるには:"]
+        for m in missing:
+            if "nejm" in m:
+                lines.append(f"  {m}: 自作のモデルです。GGUFファイルとModelfileから `ollama create {m} -f Modelfile` で登録してください")
+            else:
+                lines.append(f"  ollama pull {m}")
+        lines.append(f"今入っているモデル: {'、'.join(names) or '(なし)'}")
+        sys.exit("\n".join(lines))
 
 
 def latest_rows(rows: list) -> list:
