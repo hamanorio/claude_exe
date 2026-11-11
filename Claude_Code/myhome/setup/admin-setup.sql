@@ -52,7 +52,23 @@ create policy "admin insert 0505" on storage.objects
 create policy "admin delete 0505" on storage.objects
     for delete to authenticated using (bucket_id = '0505' and public.is_admin());
 
--- 5. 自分を管理者に登録（メールアドレスを書き換えてください）
+-- 5. projects 表：管理者だけが追加・更新・削除できる
+--    （管理ページはログインした状態で読むので、管理者用の読み取り設定も追加）
+drop policy if exists "admin select projects" on public.projects;
+drop policy if exists "admin insert projects" on public.projects;
+drop policy if exists "admin update projects" on public.projects;
+drop policy if exists "admin delete projects" on public.projects;
+
+create policy "admin select projects" on public.projects
+    for select to authenticated using (public.is_admin());
+create policy "admin insert projects" on public.projects
+    for insert to authenticated with check (public.is_admin());
+create policy "admin update projects" on public.projects
+    for update to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "admin delete projects" on public.projects
+    for delete to authenticated using (public.is_admin());
+
+-- 6. 自分を管理者に登録（メールアドレスを書き換えてください）
 insert into public.admins (user_id)
 select id from auth.users where email = 'YOUR_EMAIL@example.com'
 on conflict do nothing;

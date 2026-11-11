@@ -19,7 +19,7 @@ A static HTML/CSS/JS personal site. All dynamic content is fetched at runtime fr
 python3 -m http.server 8080 --directory myhome/
 ```
 
-**Content management:** Blog posts are added/edited/deleted from `myhome/admin.html` (login required; one-time setup in `myhome/setup/admin-setup.sql`). Projects are still edited in the Supabase dashboard (`projects` table). Changes reflect immediately on the live site without a redeploy.
+**Content management:** Blog posts and projects are added/edited/deleted from `myhome/admin.html` (login required; one-time setup in `myhome/setup/admin-setup.sql`). Changes reflect immediately on the live site without a redeploy.
 
 **Deployed at:** `https://hamanorio.github.io/claude_exe/Claude_Code/myhome/`
 

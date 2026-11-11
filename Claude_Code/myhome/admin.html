@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow">
-    <title>記事の管理 - My Home</title>
+    <title>サイトの管理 - My Home</title>
     <link rel="stylesheet" href="css/style.css">
     <style>
         .admin-wrap { max-width: 760px; margin: 0 auto; }
@@ -54,6 +54,17 @@
         .post-row .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .post-row .d { font-size: 0.8rem; color: var(--text-light); }
         .post-row.editing { border-color: var(--primary-color); }
+        .tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border-color); }
+        .tab {
+            padding: 0.6rem 1.1rem; border: none; background: none; cursor: pointer; font-size: 1rem;
+            font-family: inherit; color: var(--text-light); border-bottom: 3px solid transparent; margin-bottom: -1px;
+        }
+        .tab.active { color: var(--primary-color); border-bottom-color: var(--primary-color); font-weight: 600; }
+        .form-group select { width: 100%; padding: 0.75rem 1rem; border: 1px solid var(--border-color); border-radius: 6px; font-size: 1rem; font-family: inherit; background: #fff; }
+        .progress-input { display: flex; align-items: center; gap: 1rem; }
+        .progress-input input[type="range"] { flex: 1; padding: 0; accent-color: var(--primary-color); }
+        .progress-input input[type="number"] { width: 5.5rem; }
+        .mini-status { font-size: 0.7rem; font-weight: 600; padding: 0.1rem 0.5rem; border-radius: 999px; margin-left: 0.4rem; vertical-align: middle; }
         @media (max-width: 600px) {
             .card { padding: 1rem; }
             .post-row { flex-wrap: wrap; }
@@ -71,8 +82,8 @@
 
     <main>
         <section class="page-header">
-            <h1>記事の管理</h1>
-            <p>ここからブログ記事を追加・編集・削除できます</p>
+            <h1>サイトの管理</h1>
+            <p>ここからブログ記事とプロジェクトを追加・編集・削除できます</p>
         </section>
 
         <div class="admin-wrap">
@@ -102,6 +113,12 @@
                 </div>
                 <div id="admin-warning"></div>
 
+                <div class="tabs" role="tablist">
+                    <button class="tab active" data-tab="posts" role="tab">ブログ記事</button>
+                    <button class="tab" data-tab="projects" role="tab">プロジェクト</button>
+                </div>
+
+                <div id="tab-posts">
                 <section class="card">
                     <h2 id="form-title">新しい記事を書く</h2>
                     <form id="post-form">
@@ -146,6 +163,55 @@
                     <h2>公開中の記事</h2>
                     <div class="post-rows" id="post-rows"><p class="loading">読み込み中...</p></div>
                 </section>
+                </div>
+
+                <div id="tab-projects" hidden>
+                <section class="card">
+                    <h2 id="pj-form-title">新しいプロジェクトを追加する</h2>
+                    <form id="pj-form">
+                        <div class="form-group">
+                            <label for="pj-name">プロジェクト名<span class="req">必須</span></label>
+                            <input type="text" id="pj-name" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="pj-description">説明</label>
+                            <textarea id="pj-description" rows="3"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label for="pj-progress-range">進み具合</label>
+                            <div class="progress-input">
+                                <input type="range" id="pj-progress-range" min="0" max="100" step="5" value="0">
+                                <input type="number" id="pj-progress" min="0" max="100" value="0" aria-label="進み具合（%）">
+                                <span>%</span>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="pj-status">状態</label>
+                            <select id="pj-status">
+                                <option value="ongoing">進行中</option>
+                                <option value="completed">完了</option>
+                                <option value="paused">一時停止</option>
+                            </select>
+                            <p class="hint">進み具合を100%にすると、自動で「完了」になります。</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="pj-updated">最終更新日</label>
+                            <input type="date" id="pj-updated" required>
+                            <p class="hint">保存するときは今日の日付が入ります。変えたいときだけ直してください。</p>
+                        </div>
+                        <div class="btn-row">
+                            <button type="submit" class="submit-btn" id="pj-save-btn">追加する</button>
+                            <button type="button" class="btn" id="pj-cancel-btn" hidden>編集をやめる</button>
+                        </div>
+                        <div id="pj-msg"></div>
+                    </form>
+                </section>
+
+                <section class="card">
+                    <h2>プロジェクト一覧</h2>
+                    <div class="post-rows" id="pj-rows"><p class="loading">読み込み中...</p></div>
+                </section>
+                </div>
             </div>
         </div>
     </main>
@@ -200,7 +266,7 @@
             if (session) {
                 $('user-email').textContent = session.user.email;
                 // supabase-js の推奨：コールバック内では他の呼び出しを後回しにする
-                setTimeout(() => { checkAdmin(); loadPosts(); }, 0);
+                setTimeout(() => { checkAdmin(); loadPosts(); loadProjects(); }, 0);
             }
         });
 
@@ -426,6 +492,143 @@
 
         $('f-date').value = today();
         restoreDraft();
+
+        /* ======================================================
+           タブ切り替え
+           ====================================================== */
+        const TAB_KEY = 'myhome-admin-tab';
+        function showTab(name) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+            $('tab-posts').hidden = name !== 'posts';
+            $('tab-projects').hidden = name !== 'projects';
+            try { localStorage.setItem(TAB_KEY, name); } catch {}
+        }
+        document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => showTab(t.dataset.tab)));
+        try { if (localStorage.getItem(TAB_KEY) === 'projects') showTab('projects'); } catch {}
+
+        /* ======================================================
+           プロジェクト
+           ====================================================== */
+        const STATUS = {
+            ongoing:   { label: '進行中',   cls: 'status-ongoing' },
+            completed: { label: '完了',     cls: 'status-completed' },
+            paused:    { label: '一時停止', cls: 'status-paused' },
+        };
+        let pjEditingId = null;
+
+        const clampPct = v => Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
+        $('pj-progress-range').addEventListener('input', e => {
+            $('pj-progress').value = e.target.value;
+            if (e.target.value === '100') $('pj-status').value = 'completed';
+        });
+        $('pj-progress').addEventListener('input', e => {
+            const v = clampPct(e.target.value);
+            $('pj-progress-range').value = v;
+            if (v === 100) $('pj-status').value = 'completed';
+        });
+
+        async function loadProjects() {
+            const box = $('pj-rows');
+            const { data, error } = await db.from('projects')
+                .select('id, name, progress, status, updated_at')
+                .order('updated_at', { ascending: false })
+                .order('id', { ascending: false });
+            if (error) { box.innerHTML = `<div class="msg err">${explain(error)}</div>`; return; }
+            if (!data.length) {
+                box.innerHTML = '<p>プロジェクトがありません。</p><p class="hint" style="font-size:0.8rem;color:var(--text-light)">サイトにはプロジェクトがあるのにここに出ない場合は、<code>setup/admin-setup.sql</code> の「プロジェクト」の部分をSupabaseで実行してください。</p>';
+                return;
+            }
+            box.innerHTML = data.map(p => {
+                const st = STATUS[p.status] || STATUS.ongoing;
+                return `
+                <div class="post-row${p.id === pjEditingId ? ' editing' : ''}" data-id="${p.id}">
+                    <div class="info">
+                        <div class="t">${esc(p.name)}<span class="mini-status ${st.cls}">${st.label}</span></div>
+                        <div class="d">${clampPct(p.progress)}%${p.updated_at ? ' ・ ' + formatDate(p.updated_at) : ''}</div>
+                    </div>
+                    <button class="btn" data-act="edit">編集</button>
+                    <button class="btn danger" data-act="delete">削除</button>
+                </div>`;
+            }).join('');
+        }
+
+        $('pj-rows').addEventListener('click', async e => {
+            const btn = e.target.closest('button[data-act]');
+            if (!btn) return;
+            const row = btn.closest('.post-row');
+            const id = Number(row.dataset.id);
+            const name = row.querySelector('.t').firstChild.textContent;
+            if (btn.dataset.act === 'edit') return startProjectEdit(id);
+            if (!confirm(`「${name}」を削除します。元に戻せません。よろしいですか？`)) return;
+            const { data, error } = await db.from('projects').delete().eq('id', id).select('id');
+            if (error || !data?.length) {
+                showMsg('pj-msg', 'err', '削除できませんでした：' + explain(error || { code: '42501' }));
+                return;
+            }
+            if (pjEditingId === id) resetProjectForm();
+            showMsg('pj-msg', 'ok', `「${esc(name)}」を削除しました。`);
+            loadProjects();
+        });
+
+        async function startProjectEdit(id) {
+            const { data: p, error } = await db.from('projects').select('*').eq('id', id).single();
+            if (error) { showMsg('pj-msg', 'err', explain(error)); return; }
+            pjEditingId = id;
+            $('pj-name').value = p.name || '';
+            $('pj-description').value = p.description || '';
+            $('pj-progress').value = $('pj-progress-range').value = clampPct(p.progress);
+            $('pj-status').value = STATUS[p.status] ? p.status : 'ongoing';
+            $('pj-updated').value = today();
+            $('pj-form-title').textContent = 'プロジェクトを編集する';
+            $('pj-save-btn').textContent = '更新する';
+            $('pj-cancel-btn').hidden = false;
+            showMsg('pj-msg', '', '');
+            loadProjects();
+            $('pj-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        function resetProjectForm() {
+            pjEditingId = null;
+            $('pj-form').reset();
+            $('pj-progress').value = $('pj-progress-range').value = 0;
+            $('pj-updated').value = today();
+            $('pj-form-title').textContent = '新しいプロジェクトを追加する';
+            $('pj-save-btn').textContent = '追加する';
+            $('pj-cancel-btn').hidden = true;
+        }
+        $('pj-cancel-btn').addEventListener('click', () => { resetProjectForm(); showMsg('pj-msg', '', ''); loadProjects(); });
+
+        $('pj-form').addEventListener('submit', async e => {
+            e.preventDefault();
+            const btn = $('pj-save-btn');
+            btn.disabled = true;
+            showMsg('pj-msg', 'info', '保存しています...');
+            try {
+                const row = {
+                    name: $('pj-name').value.trim(),
+                    description: $('pj-description').value.trim(),
+                    progress: clampPct($('pj-progress').value),
+                    status: $('pj-status').value,
+                    updated_at: $('pj-updated').value || today(),
+                };
+                const q = pjEditingId
+                    ? db.from('projects').update(row).eq('id', pjEditingId).select('id')
+                    : db.from('projects').insert(row).select('id');
+                const { data, error } = await q;
+                if (error) throw error;
+                if (!data?.length) throw { code: '42501', message: 'permission' };
+                const wasEdit = !!pjEditingId;
+                resetProjectForm();
+                showMsg('pj-msg', 'ok', `${wasEdit ? '更新' : '追加'}しました。<a href="projects.html" target="_blank" rel="noopener">プロジェクトページを見る →</a>`);
+                loadProjects();
+            } catch (err) {
+                showMsg('pj-msg', 'err', '保存できませんでした：' + explain(err));
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        $('pj-updated').value = today();
     })();
     </script>
 </body>
