@@ -61,6 +61,12 @@
 
             document.title = `${post.title} - My Blog`;
 
+            // HTMLタグを含まない本文は、改行をそのまま表示する
+            const renderContent = c => {
+                if (!c) return '';
+                return /<[a-z][\s\S]*>/i.test(c) ? c : c.replace(/\r?\n/g, '<br>');
+            };
+
             const images = Array.isArray(post.images) ? post.images : [];
             const imagesHTML = images.map(filename => `
                 <figure>
@@ -89,7 +95,7 @@
                         <p class="post-meta">${formatDate(post.date)}</p>
                     </div>
                     <div class="post-content">
-                        <p>${post.content || ''}</p>
+                        <p>${renderContent(post.content)}</p>
                         ${imagesHTML}
                         ${videosHTML}
                     </div>
