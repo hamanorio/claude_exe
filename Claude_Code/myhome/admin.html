@@ -155,9 +155,11 @@
     </footer>
 
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <script src="js/supabase.js?v=2"></script>
+    <script src="js/supabase.js?v=3"></script>
     <script>
     (() => {
+        // 管理ページだけはログイン状態を保存するクライアントを使う
+        const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
         const $ = id => document.getElementById(id);
         const BUCKET = '0505';
         const DRAFT_KEY = 'myhome-admin-draft';
