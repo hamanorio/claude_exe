@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow">
+    <title>記事の管理 - My Home</title>
+    <link rel="stylesheet" href="css/style.css">
+    <style>
+        .admin-wrap { max-width: 760px; margin: 0 auto; }
+        .admin-bar {
+            display: flex; justify-content: space-between; align-items: center;
+            gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem;
+            color: var(--text-light); font-size: 0.9rem;
+        }
+        .card {
+            background: var(--bg-gray); border: 1px solid var(--border-color);
+            border-radius: 12px; padding: 1.5rem; margin-bottom: 2rem;
+        }
+        .card h2 { font-size: 1.25rem; margin-bottom: 1.25rem; }
+        .form-group .hint { font-size: 0.8rem; color: var(--text-light); margin-top: 0.35rem; }
+        .form-group .req { color: #dc2626; font-size: 0.8rem; margin-left: 0.25rem; }
+        .form-group input[type="file"] { padding: 0.5rem; background: #fff; }
+        .btn-row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+        .btn-row .submit-btn { flex: 1; min-width: 160px; }
+        .btn {
+            padding: 0.6rem 1rem; border-radius: 6px; border: 1px solid var(--border-color);
+            background: #fff; color: var(--text-color); font-size: 0.9rem; cursor: pointer; font-family: inherit;
+        }
+        .btn:hover { border-color: var(--primary-color); color: var(--primary-color); }
+        .btn.danger:hover { border-color: #dc2626; color: #dc2626; }
+        .submit-btn:disabled { opacity: 0.6; cursor: wait; }
+        .msg { margin-top: 1rem; padding: 0.75rem 1rem; border-radius: 6px; font-size: 0.9rem; }
+        .msg.ok { background: #dcfce7; color: #166534; }
+        .msg.err { background: #fee2e2; color: #991b1b; }
+        .msg.info { background: #dbeafe; color: #1e40af; }
+        .thumbs { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.75rem; }
+        .thumb { position: relative; width: 110px; height: 110px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border-color); background: #fff; }
+        .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .thumb button {
+            position: absolute; top: 4px; right: 4px; width: 26px; height: 26px; border-radius: 50%;
+            border: none; background: rgba(0,0,0,0.65); color: #fff; cursor: pointer; font-size: 0.9rem; line-height: 1;
+        }
+        .thumb .tag {
+            position: absolute; left: 4px; bottom: 4px; font-size: 0.7rem; padding: 1px 6px;
+            border-radius: 4px; background: rgba(37,99,235,0.9); color: #fff;
+        }
+        .post-rows { display: flex; flex-direction: column; gap: 0.5rem; }
+        .post-row {
+            display: flex; align-items: center; gap: 0.75rem; background: #fff;
+            border: 1px solid var(--border-color); border-radius: 8px; padding: 0.75rem 1rem;
+        }
+        .post-row .info { flex: 1; min-width: 0; }
+        .post-row .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .post-row .d { font-size: 0.8rem; color: var(--text-light); }
+        .post-row.editing { border-color: var(--primary-color); }
+        @media (max-width: 600px) {
+            .card { padding: 1rem; }
+            .post-row { flex-wrap: wrap; }
+            .post-row .info { flex-basis: 100%; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <nav class="navbar">
+            <div class="logo"><a href="index.html">My Home</a></div>
+            <a href="blog.html" style="font-size:0.95rem">ブログを見る →</a>
+        </nav>
+    </header>
+
+    <main>
+        <section class="page-header">
+            <h1>記事の管理</h1>
+            <p>ここからブログ記事を追加・編集・削除できます</p>
+        </section>
+
+        <div class="admin-wrap">
+            <!-- ログイン画面 -->
+            <section id="login-view" class="card" hidden>
+                <h2>ログイン</h2>
+                <form id="login-form">
+                    <div class="form-group">
+                        <label for="login-email">メールアドレス</label>
+                        <input type="email" id="login-email" autocomplete="username" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="login-password">パスワード</label>
+                        <input type="password" id="login-password" autocomplete="current-password" required>
+                    </div>
+                    <button type="submit" class="submit-btn" id="login-btn">ログイン</button>
+                    <p class="form-note">一度ログインすると、このブラウザではログインしたままになります。</p>
+                    <div id="login-msg"></div>
+                </form>
+            </section>
+
+            <!-- 管理画面 -->
+            <div id="app-view" hidden>
+                <div class="admin-bar">
+                    <span>ログイン中：<strong id="user-email"></strong></span>
+                    <button class="btn" id="logout-btn">ログアウト</button>
+                </div>
+                <div id="admin-warning"></div>
+
+                <section class="card">
+                    <h2 id="form-title">新しい記事を書く</h2>
+                    <form id="post-form">
+                        <div class="form-group">
+                            <label for="f-title">タイトル<span class="req">必須</span></label>
+                            <input type="text" id="f-title" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="f-date">日付</label>
+                            <input type="date" id="f-date" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="f-summary">概要</label>
+                            <textarea id="f-summary" rows="2"></textarea>
+                            <p class="hint">ブログ一覧に表示される短い説明です。</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="f-content">本文</label>
+                            <textarea id="f-content" rows="12"></textarea>
+                            <p class="hint">改行はそのまま記事に反映されます。</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="f-images">画像</label>
+                            <input type="file" id="f-images" accept="image/*" multiple>
+                            <p class="hint">複数選べます。大きな写真は自動で縮小してからアップロードします。</p>
+                            <div class="thumbs" id="thumbs"></div>
+                        </div>
+                        <div class="form-group">
+                            <label for="f-videos">YouTube動画のURL</label>
+                            <textarea id="f-videos" rows="2" placeholder="https://www.youtube.com/watch?v=..."></textarea>
+                            <p class="hint">1行に1つずつ入力します。</p>
+                        </div>
+                        <div class="btn-row">
+                            <button type="submit" class="submit-btn" id="save-btn">公開する</button>
+                            <button type="button" class="btn" id="cancel-btn" hidden>編集をやめる</button>
+                        </div>
+                        <div id="form-msg"></div>
+                    </form>
+                </section>
+
+                <section class="card">
+                    <h2>公開中の記事</h2>
+                    <div class="post-rows" id="post-rows"><p class="loading">読み込み中...</p></div>
+                </section>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 My Home. All rights reserved.</p>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="js/supabase.js?v=2"></script>
+    <script>
+    (() => {
+        const $ = id => document.getElementById(id);
+        const BUCKET = '0505';
+        const DRAFT_KEY = 'myhome-admin-draft';
+        const MAX_SIDE = 1600;
+
+        let currentUserId = null;
+        let editingId = null;
+        let keptImages = [];   // 既存の画像（ファイル名）
+        let newFiles = [];     // これからアップロードする File
+
+        const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        const parseArr = v => Array.isArray(v) ? v : (typeof v === 'string'
+            ? v.replace(/^\{|\}$/g, '').split(',').map(s => s.replace(/^"|"$/g, '').trim()).filter(Boolean) : []);
+        const today = () => {
+            const d = new Date();
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        };
+        const showMsg = (el, type, html) => { $(el).innerHTML = html ? `<div class="msg ${type}">${html}</div>` : ''; };
+
+        function explain(error) {
+            const m = (error && (error.message || error.error_description)) || String(error);
+            if (/Invalid login credentials/i.test(m)) return 'メールアドレスかパスワードが違います。';
+            if (/Email not confirmed/i.test(m)) return 'メールアドレスの確認が済んでいません。Supabaseでユーザーを作るときに「Auto Confirm User」をオンにしてください。';
+            if (/row-level security|violates|permission|not authorized|Unauthorized|42501/i.test(m) || error?.code === '42501')
+                return '書き込む権限がありません。セットアップのSQL（setup/admin-setup.sql）を実行したか、管理者のメールアドレスが正しいか確認してください。';
+            if (/JWT|session/i.test(m)) return 'ログインの有効期限が切れました。ログインし直してください。';
+            if (/Failed to fetch|NetworkError/i.test(m)) return '通信に失敗しました。インターネット接続を確認してください。';
+            return esc(m);
+        }
+
+        /* ---------- ログイン ---------- */
+        db.auth.onAuthStateChange((_event, session) => {
+            const uid = session?.user?.id || null;
+            if (uid === currentUserId && _event !== 'INITIAL_SESSION') return;
+            currentUserId = uid;
+            $('login-view').hidden = !!session;
+            $('app-view').hidden = !session;
+            if (session) {
+                $('user-email').textContent = session.user.email;
+                // supabase-js の推奨：コールバック内では他の呼び出しを後回しにする
+                setTimeout(() => { checkAdmin(); loadPosts(); }, 0);
+            }
+        });
+
+        $('login-form').addEventListener('submit', async e => {
+            e.preventDefault();
+            $('login-btn').disabled = true;
+            showMsg('login-msg', 'info', 'ログインしています...');
+            const { error } = await db.auth.signInWithPassword({
+                email: $('login-email').value.trim(),
+                password: $('login-password').value,
+            });
+            $('login-btn').disabled = false;
+            if (error) showMsg('login-msg', 'err', explain(error));
+            else { showMsg('login-msg', '', ''); $('login-password').value = ''; }
+        });
+
+        $('logout-btn').addEventListener('click', () => db.auth.signOut());
+
+        async function checkAdmin() {
+            const { data, error } = await db.rpc('is_admin');
+            if (error) {
+                showMsg('admin-warning', 'err', 'セットアップがまだ完了していないようです。<code>setup/admin-setup.sql</code> をSupabaseで実行してください。');
+            } else if (data !== true) {
+                showMsg('admin-warning', 'err', 'このアカウントは管理者として登録されていないため、記事を保存できません。<code>setup/admin-setup.sql</code> の最後のメールアドレスを確認してください。');
+            } else {
+                showMsg('admin-warning', '', '');
+            }
+        }
+
+        /* ---------- 記事一覧 ---------- */
+        async function loadPosts() {
+            const box = $('post-rows');
+            const { data: posts, error } = await db.from('posts')
+                .select('id, title, date')
+                .order('date', { ascending: false })
+                .order('id', { ascending: false });
+            if (error) { box.innerHTML = `<div class="msg err">${explain(error)}</div>`; return; }
+            if (!posts.length) { box.innerHTML = '<p>まだ記事がありません。</p>'; return; }
+            box.innerHTML = posts.map(p => `
+                <div class="post-row${p.id === editingId ? ' editing' : ''}" data-id="${p.id}">
+                    <div class="info">
+                        <div class="t">${esc(p.title)}</div>
+                        <div class="d">${p.date ? formatDate(p.date) : ''}</div>
+                    </div>
+                    <a class="btn" href="blog/post.html#${p.id}" target="_blank" rel="noopener">見る</a>
+                    <button class="btn" data-act="edit">編集</button>
+                    <button class="btn danger" data-act="delete">削除</button>
+                </div>`).join('');
+        }
+
+        $('post-rows').addEventListener('click', async e => {
+            const btn = e.target.closest('button[data-act]');
+            if (!btn) return;
+            const row = btn.closest('.post-row');
+            const id = Number(row.dataset.id);
+            const title = row.querySelector('.t').textContent;
+            if (btn.dataset.act === 'edit') return startEdit(id);
+            if (btn.dataset.act === 'delete') {
+                if (!confirm(`「${title}」を削除します。元に戻せません。よろしいですか？`)) return;
+                const { data: post } = await db.from('posts').select('images').eq('id', id).single();
+                const { data: deleted, error } = await db.from('posts').delete().eq('id', id).select('id');
+                if (error || !deleted?.length) {
+                    showMsg('form-msg', 'err', '削除できませんでした：' + explain(error || { code: '42501' }));
+                    return;
+                }
+                const imgs = parseArr(post?.images);
+                if (imgs.length) await db.storage.from(BUCKET).remove(imgs);
+                if (editingId === id) resetForm();
+                showMsg('form-msg', 'ok', `「${esc(title)}」を削除しました。`);
+                loadPosts();
+            }
+        });
+
+        /* ---------- 編集 ---------- */
+        async function startEdit(id) {
+            const { data: post, error } = await db.from('posts').select('*').eq('id', id).single();
+            if (error) { showMsg('form-msg', 'err', explain(error)); return; }
+            editingId = id;
+            $('f-title').value = post.title || '';
+            $('f-date').value = post.date || today();
+            $('f-summary').value = post.summary || '';
+            $('f-content').value = post.content || '';
+            $('f-videos').value = parseArr(post.videos).join('\n');
+            keptImages = parseArr(post.images);
+            newFiles = [];
+            $('f-images').value = '';
+            renderThumbs();
+            $('form-title').textContent = '記事を編集する';
+            $('save-btn').textContent = '更新する';
+            $('cancel-btn').hidden = false;
+            showMsg('form-msg', '', '');
+            loadPosts();
+            $('post-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        function resetForm() {
+            editingId = null;
+            $('post-form').reset();
+            $('f-date').value = today();
+            keptImages = [];
+            newFiles = [];
+            renderThumbs();
+            $('form-title').textContent = '新しい記事を書く';
+            $('save-btn').textContent = '公開する';
+            $('cancel-btn').hidden = true;
+        }
+
+        $('cancel-btn').addEventListener('click', () => { resetForm(); restoreDraft(); showMsg('form-msg', '', ''); loadPosts(); });
+
+        /* ---------- 画像 ---------- */
+        $('f-images').addEventListener('change', e => {
+            newFiles.push(...Array.from(e.target.files));
+            e.target.value = '';
+            renderThumbs();
+        });
+
+        function renderThumbs() {
+            const box = $('thumbs');
+            box.querySelectorAll('img[data-blob]').forEach(img => URL.revokeObjectURL(img.src));
+            box.innerHTML =
+                keptImages.map((name, i) => `
+                    <div class="thumb"><img src="${imageUrl(name)}" alt="">
+                        <button type="button" data-kind="kept" data-i="${i}" aria-label="画像を外す">×</button></div>`).join('') +
+                newFiles.map((f, i) => `
+                    <div class="thumb"><img data-blob src="${URL.createObjectURL(f)}" alt="">
+                        <span class="tag">新規</span>
+                        <button type="button" data-kind="new" data-i="${i}" aria-label="画像を外す">×</button></div>`).join('');
+        }
+
+        $('thumbs').addEventListener('click', e => {
+            const b = e.target.closest('button[data-kind]');
+            if (!b) return;
+            const i = Number(b.dataset.i);
+            if (b.dataset.kind === 'kept') keptImages.splice(i, 1); else newFiles.splice(i, 1);
+            renderThumbs();
+        });
+
+        // 大きなJPEG/PNG/WebPを縮小（GIFなどはそのまま）
+        async function shrink(file) {
+            if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return file;
+            try {
+                const bmp = await createImageBitmap(file);
+                const scale = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+                if (scale === 1 && file.size < 1.5 * 1024 * 1024) return file;
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.round(bmp.width * scale);
+                canvas.height = Math.round(bmp.height * scale);
+                canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height);
+                const type = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+                const blob = await new Promise(r => canvas.toBlob(r, type, 0.85));
+                return blob && blob.size < file.size ? blob : file;
+            } catch { return file; }
+        }
+
+        function fileName(blob, original) {
+            const ext = ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' }[blob.type])
+                || (original.name.split('.').pop() || 'img').toLowerCase().replace(/[^a-z0-9]/g, '');
+            const d = today().replace(/-/g, '');
+            return `${d}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+        }
+
+        /* ---------- 保存 ---------- */
+        $('post-form').addEventListener('submit', async e => {
+            e.preventDefault();
+            const btn = $('save-btn');
+            btn.disabled = true;
+            const uploaded = [];
+            try {
+                for (let i = 0; i < newFiles.length; i++) {
+                    showMsg('form-msg', 'info', `画像をアップロードしています... (${i + 1}/${newFiles.length})`);
+                    const blob = await shrink(newFiles[i]);
+                    const name = fileName(blob, newFiles[i]);
+                    const { error } = await db.storage.from(BUCKET).upload(name, blob, { contentType: blob.type || undefined });
+                    if (error) throw error;
+                    uploaded.push(name);
+                }
+                showMsg('form-msg', 'info', '保存しています...');
+
+                const row = {
+                    title: $('f-title').value.trim(),
+                    date: $('f-date').value || today(),
+                    summary: $('f-summary').value.trim(),
+                    content: $('f-content').value,
+                    images: [...keptImages, ...uploaded],
+                    videos: $('f-videos').value.split('\n').map(s => s.trim()).filter(Boolean),
+                };
+
+                const q = editingId
+                    ? db.from('posts').update(row).eq('id', editingId).select('id')
+                    : db.from('posts').insert(row).select('id');
+                const { data, error } = await q;
+                if (error) throw error;
+                if (!data?.length) throw { code: '42501', message: 'permission' };
+
+                const id = data[0].id;
+                const wasEdit = !!editingId;
+                if (!wasEdit) clearDraft();
+                resetForm();
+                showMsg('form-msg', 'ok', `${wasEdit ? '更新' : '公開'}しました。<a href="blog/post.html#${id}" target="_blank" rel="noopener">記事を見る →</a>`);
+                loadPosts();
+            } catch (err) {
+                if (uploaded.length) await db.storage.from(BUCKET).remove(uploaded);
+                showMsg('form-msg', 'err', '保存できませんでした：' + explain(err));
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        /* ---------- 下書きの自動保存（新規作成時のみ・このブラウザ内） ---------- */
+        const draftFields = ['f-title', 'f-date', 'f-summary', 'f-content', 'f-videos'];
+        function saveDraft() {
+            if (editingId) return;
+            try { localStorage.setItem(DRAFT_KEY, JSON.stringify(Object.fromEntries(draftFields.map(f => [f, $(f).value])))); } catch {}
+        }
+        function restoreDraft() {
+            try {
+                const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
+                if (d) draftFields.forEach(f => { if (d[f]) $(f).value = d[f]; });
+            } catch {}
+        }
+        function clearDraft() { try { localStorage.removeItem(DRAFT_KEY); } catch {} }
+        draftFields.forEach(f => $(f).addEventListener('input', saveDraft));
+
+        $('f-date').value = today();
+        restoreDraft();
+    })();
+    </script>
+</body>
+</html>
