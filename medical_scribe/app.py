@@ -15,7 +15,7 @@
    自由文に埋め込まず、医師が個別に確認・選択する形で表示
 8. ②③④⑤のLLM処理をOpenAI APIの代わりにローカルのSwallowモデルで実行する選択肢
    (実在患者データを扱う際の越境移転の問題を避けるため)
-9. 確認済みの所見から、NEJM症例でファインチューニングしたモデル(Ollama)で鑑別診断の参考を出す
+9. 確認済みの所見から、Ollamaのモデル(初期値はgpt-oss:20b)で鑑別診断の参考を出す
    (最終判断は医師。出力に病歴に無い数値・検査名があれば⚠で示す)
 
 使い方(Google Colab):
@@ -169,7 +169,12 @@ def strip_thinking(text: str) -> str:
 
 
 def generate_with_ollama(
-    prompt: str, model_name: str, json_mode: bool = False, system: str = "", max_tokens: int = OLLAMA_MAX_TOKENS
+    prompt: str,
+    model_name: str,
+    json_mode: bool = False,
+    system: str = "",
+    max_tokens: int = OLLAMA_MAX_TOKENS,
+    num_ctx: int = 8192,
 ) -> str:
     """Mac上のOllama(量子化済みSwallow)で生成する。データはMacの外に出ない。
     生成結果を少しずつ受け取る(ストリーミング)ので、全体に時間がかかっても途中で
@@ -188,7 +193,7 @@ def generate_with_ollama(
         "options": {
             "temperature": 0,
             "repeat_penalty": 1.15,
-            "num_ctx": 8192,
+            "num_ctx": num_ctx,
             "num_predict": max_tokens,
         },
     }
@@ -1115,11 +1120,33 @@ def build_chart_draft(findings: list) -> str:
     return "\n".join(out)
 
 
-# ---- ⑧ 鑑別診断の参考(NEJM症例でファインチューニングしたモデル) ----
+# ---- ⑧ 鑑別診断の参考(初期値は gpt-oss:20b。NEJM症例の比較で最も成績がよかった) ----
 
 # 学習データと同じシステムプロンプト・入力形式にする(変えると学習の効果が出にくくなる)
 DDX_SYSTEM_PROMPT = "あなたは医師を支援する医療AIです。病歴を読み、鑑別診断を挙げ、検証的推論を行い最終診断を考えてください。"
 DDX_SECTIONS = ["問題表現", "鑑別診断", "検証的推論", "最終診断"]
+# NEJMでファインチューニングしたモデルは学習で見出しの形を覚えているが、汎用のモデル(gpt-oss など)は
+# 指示しないと見出しを付けないので、画面で各部分を読み取れるよう形式を指定する
+DDX_FORMAT_INSTRUCTION = """
+日本語で、次の4つの見出しを付けて答えてください。
+## 問題表現
+(患者の要点を1〜2文で)
+## 鑑別診断
+(可能性が高い順に番号付きで最大5つ。それぞれ根拠となる所見を添える)
+## 検証的推論
+(上位の候補について、合う所見・合わない所見と、次に行う検査)
+## 最終診断
+(最も可能性が高い診断名を1つだけ)
+病歴に書かれていない検査値や所見を作らないでください。"""
+# gpt-oss など考える型のモデルは、考える分も出力の上限に含まれるので大きめにする
+DDX_MAX_TOKENS = 8192
+DDX_NUM_CTX = 16384
+
+
+def ddx_system_prompt(model_name: str) -> str:
+    if "nejm" in model_name.lower():
+        return DDX_SYSTEM_PROMPT  # 学習データと同じ指示文のまま使う
+    return DDX_SYSTEM_PROMPT + DDX_FORMAT_INSTRUCTION
 
 
 def build_history_text(findings: list, patient_info: str) -> str:
@@ -1403,8 +1430,9 @@ with st.sidebar:
         st.caption("⚠️ 初回実行時はモデルのダウンロード・読み込みに時間がかかります。GPUのメモリ使用量にも注意してください。")
     ddx_model = st.text_input(
         "⑧ 鑑別診断の参考に使うモデル(Ollama)",
-        "swallow-8b-nejm",
-        help="NEJMの症例でファインチューニングしたモデルの、`ollama list` で表示される名前。"
+        "gpt-oss:20b",
+        help="`ollama list` で表示される名前。NEJM症例の比較では gpt-oss:20b > medgemma:27b > qwen3:14b の順に"
+        "成績がよかったので、gpt-oss:20b を初期値にしています(64GBのMac向け)。16GBのMacでは swallow-8b-nejm を指定してください。"
         "患者データを外に出さないため、⑧はMac上のOllamaでだけ動かします。",
     )
     st.divider()
@@ -1881,8 +1909,8 @@ if uploaded_file:
                 st.divider()
                 st.subheader("⑧ 鑑別診断の参考")
                 st.warning(
-                    "これは診断ではなく、見落としを防ぐための参考情報です。8Bの小型モデルのため、"
-                    "典型的な疾患以外はほとんど当たらず、説明文には医学的な誤りが混じります。"
+                    "これは診断ではなく、見落としを防ぐための参考情報です。手元で動く中程度の大きさのモデルのため、"
+                    "外れることも多く、説明文には医学的な誤りが混じります。"
                     "【A】(評価)は必ず医師ご自身の判断で記入してください(ここから自動では入りません)。"
                 )
                 confirmed_findings = st.session_state.get("confirmed_findings", [])
@@ -1907,7 +1935,11 @@ if uploaded_file:
                         with st.spinner(f"{ddx_model}で考えています...(数分かかることがあります)"):
                             try:
                                 st.session_state.ddx_output = generate_with_ollama(
-                                    f"'病歴': {history}", ddx_model, system=DDX_SYSTEM_PROMPT, max_tokens=1536
+                                    f"'病歴': {history}",
+                                    ddx_model,
+                                    system=ddx_system_prompt(ddx_model),
+                                    max_tokens=DDX_MAX_TOKENS,
+                                    num_ctx=DDX_NUM_CTX,
                                 )
                                 st.session_state.ddx_history = history
                             except Exception as e:
