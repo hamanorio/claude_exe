@@ -759,38 +759,91 @@ def confidence_badge(avg_logprob) -> str:
         return "🟢 高信頼"
 
 
-def check_vague_terms(text: str, backend: str, api_key: str, local_model_path: str) -> str:
-    """長い会話は分割してチェックし、指摘をまとめる。"""
-    flags = [check_vague_terms_chunk(c, backend, api_key, local_model_path) for c in split_into_chunks(text)]
-    flags = [f for f in flags if f and not f.startswith(NO_FLAG_PHRASE)]
-    return "\n\n".join(flags) if flags else NO_FLAG_PHRASE + "。"
+def check_vague_terms(text: str, backend: str, api_key: str, local_model_path: str, candidate_terms=()) -> dict:
+    """長い会話は分割してチェックし、指摘をまとめる。
+    返り値: {"flags": 指摘の一覧(parse_vague_flags の形), "raw": LLMの出力全文}"""
+    outputs = [
+        check_vague_terms_chunk(c, backend, api_key, local_model_path, candidate_terms) for c in split_into_chunks(text)
+    ]
+    outputs = [o for o in outputs if o and not o.startswith(NO_FLAG_PHRASE)]
+    raw = "\n\n".join(outputs) if outputs else NO_FLAG_PHRASE + "。"
+    return {"flags": parse_vague_flags(raw, text), "raw": raw}
 
 
-def check_vague_terms_chunk(text: str, backend: str, api_key: str, local_model_path: str) -> str:
-    prompt = f"""以下はカルテ下書きです。
+def check_vague_terms_chunk(text: str, backend: str, api_key: str, local_model_path: str, candidate_terms=()) -> str:
+    terms = "、".join(list(candidate_terms)[:MAX_CANDIDATE_TERMS])
+    term_hint = f"\n誤認識された医学用語の正しい形は、次の用語のどれかであることが多いです:\n{terms}\n" if terms else ""
+    prompt = f"""以下は、医師と患者の診察会話を音声認識で文字起こししたテキストです。
 次の2種類の箇所を探して、音声認識の誤りの可能性があるとして指摘してください。
 
 1. 意味の通らない語句: 診察の会話として文脈上ありえない単語や、医学用語が崩れたように見える語句
    (例:「心房最同」「左の配に影」のように、一般語の組み合わせとしても医学用語としても不自然なもの)
 2. 医師の発言の中の曖昧な部位表現: 診察所見として、身体のどこかが特定できないもの
    (例:医師が「奥のほうに」「あのへんに」と言っていて、部位が分からないもの)
-
+{term_hint}
 患者が自分の症状を自分の言葉で表した表現(「ズキズキする」「キラキラした光」「重い感じ」など)は、
 症状の性質を伝える大切な情報なので、曖昧として指摘しないでください。
 会話なので、話し言葉が口語的なのは自然です。言い回しが口語的というだけでは指摘しないでください。
 また、医学的に正しく使われている語(例:「発作」「前兆」「圧痛」)を別の語に言い換える提案はしないでください。
 
-文を1つずつ確認し、見落としが無いようにしてください。
-問題のある箇所だけを挙げ、問題のない文は書かないでください(「特に問題なし」と1文ずつ書くことはしない)。
-断定せず、「要確認」として該当箇所を引用した上で挙げてください。
-該当箇所が無い場合は「特に気になる曖昧な表現はありません」とだけ答えてください。
+答え方:
+- 1つの指摘を1行で、次の形で書いてください。前置きや見出し、箇条書きの記号は不要です。
+  要確認｜元の語句｜修正候補｜理由
+- 元の語句は、テキスト中の文字を一字一句そのまま、問題の語を含む短い範囲(2〜10文字程度)で書き写してください。
+- 修正候補は、音が近く文脈に合う正しい語句を1つ書いてください。元の語句と同じ範囲を置き換える形にします。
+  確信が持てない場合や、曖昧な部位表現の場合は「なし」と書いてください。
+- 数字(脈拍、血圧、検査値、日付など)は推測で直さず、修正候補は「なし」にしてください。
+- 文を1つずつ確認し、見落としが無いようにしてください。問題のない文は書かないでください。
+- 該当箇所が無い場合は「特に気になる曖昧な表現はありません」とだけ答えてください。
 
-【カルテ下書き】
+【例】
+要確認｜心房最同｜心房細動｜医学用語が崩れている
+要確認｜奥のほうに｜なし｜医師の所見で部位が特定できない
+
+【文字起こし】
 {text}
 
-【要確認フラグ】
+【要確認の一覧】
 """
     return drop_contradicting_none(run_llm(prompt, backend, api_key, local_model_path))
+
+
+def parse_vague_flags(output: str, text: str) -> list:
+    """④の出力(要確認｜元の語句｜修正候補｜理由)を読み取る。
+    返り値: [{"phrase", "suggestion"(無ければ""), "reason", "count"(本文中の出現数)}]
+    - 元の語句が本文に見つからない指摘も残すが(count=0)、置き換えの対象にはしない。
+    - 数字が変わる候補は採用させない(脈拍「212回」→「112回」のような推測の修正を防ぐ)。
+    """
+    flags, seen = [], set()
+    for line in output.splitlines():
+        line = re.sub(r"^\s*(?:[-*・]|\d+[.)．])\s*", "", line.strip())
+        cells = [c.strip().strip("「」『』\"'*` ") for c in re.split(r"[｜|]", line)]
+        if cells and cells[0].startswith("要確認"):
+            cells = cells[1:]
+        if len(cells) < 2 or not cells[0] or cells[0] in ("元の語句",):
+            continue
+        phrase = cells[0]
+        suggestion = cells[1] if len(cells) > 1 else ""
+        reason = "｜".join(cells[2:]) if len(cells) > 2 else ""
+        if suggestion in ("なし", "無し", "-", "—", "不明", phrase):
+            suggestion = ""
+        if suggestion and re.findall(r"[0-9０-９]+", phrase) != re.findall(r"[0-9０-９]+", suggestion):
+            suggestion = ""
+            reason = (reason + " " if reason else "") + "(数字は推測で直さないため、候補は出しません)"
+        if phrase in seen:
+            continue
+        seen.add(phrase)
+        flags.append({"phrase": phrase, "suggestion": suggestion, "reason": reason, "count": text.count(phrase)})
+    return flags
+
+
+def apply_vague_fixes(text: str, flags: list, accepted: dict) -> str:
+    """④で採用にチェックした候補で、元の語句を置き換える(同じ語句が何回出ても全部)。
+    長い語句から先に置き換え、短い語句が長い語句の一部を壊さないようにする。"""
+    chosen = [f for i, f in enumerate(flags) if accepted.get(i) and f["suggestion"]]
+    for f in sorted(chosen, key=lambda f: -len(f["phrase"])):
+        text = text.replace(f["phrase"], f["suggestion"])
+    return text
 
 
 NO_FLAG_PHRASE = "特に気になる曖昧な表現はありません"
@@ -1414,13 +1467,13 @@ with st.sidebar:
     elif llm_backend == "ローカル(Ollama・Mac向け)":
         local_model_path = st.text_input(
             "Ollamaのモデル名",
-            "qwen3:8b",
-            help="`ollama list` で表示される名前。初期値はQwen3 8B(`ollama pull qwen3:8b` で入手、約5GB)。"
-            "16GBのMacでは14Bと所見の質が同等で、⑤の抽出が約1.7倍速かったため8Bにしている。"
-            "メモリの多いMacでは qwen3:14b、Swallow 8B を使う場合は swallow-8b と入力してください。"
-            "Qwen3 は答える前に考える型のモデルですが、②〜⑤では考える機能を切って速く動かします。",
+            "gpt-oss:20b",
+            help="`ollama list` で表示される名前。初期値は gpt-oss:20b(`ollama pull gpt-oss:20b` で入手、約13GB)。"
+            "64GBのMacでの比較で、③の補正が最も正確(qwen3:8b・14bより誤った修正が少ない)で、書き出しも最速だった。"
+            "考える量は最小(low)にしています。16GBのMacでは qwen3:8b と入力してください"
+            "(Qwen3は②〜⑤では考える機能を切って速く動かします)。",
         )
-        st.caption("⚠️ 事前にOllamaを起動しておいてください。16GBのMacでは他のアプリを閉じておくと安定します。")
+        st.caption("⚠️ 事前にOllamaを起動しておいてください。16GBのMacでは qwen3:8b を使い、他のアプリを閉じておくと安定します。")
     else:
         local_model_path = st.text_input(
             "Swallowモデルのパス",
@@ -1744,12 +1797,53 @@ if uploaded_file:
                     st.error(backend_error)
                 else:
                     with st.spinner("チェック中..."):
-                        st.session_state.vague_flags = check_vague_terms(
-                            reviewed_text, llm_backend, api_key, local_model_path
+                        st.session_state.vague_result = check_vague_terms(
+                            reviewed_text, llm_backend, api_key, local_model_path, candidate_terms=sound_terms
                         )
+                        st.session_state.vague_source = reviewed_text
+                        st.session_state.vague_run = st.session_state.get("vague_run", 0) + 1
 
-            if "vague_flags" in st.session_state:
-                st.warning(st.session_state.vague_flags)
+            checked_text = reviewed_text  # ④で採用した修正を反映した文章(⑤⑥はこれを使う)
+            vague = st.session_state.get("vague_result")
+            if vague:
+                if st.session_state.get("vague_source", "").strip() != reviewed_text.strip():
+                    st.caption("⚠️ ③の採用・却下が、このチェックをしたときから変わっています。必要ならもう一度チェックしてください。")
+                flags = vague["flags"]
+                fixable = [i for i, f in enumerate(flags) if f["suggestion"] and f["count"]]
+                others = [i for i, f in enumerate(flags) if i not in fixable]
+                vrun = st.session_state.get("vague_run", 0)
+                vague_accepted = {}
+                if fixable:
+                    st.markdown("**修正候補の採用・却下**(チェックを入れたものだけが反映されます。初期状態はすべて却下)")
+                    for i in fixable:
+                        f = flags[i]
+                        times = f"(本文に{f['count']}箇所)" if f["count"] > 1 else ""
+                        label = (
+                            f":red[~~{md_escape(f['phrase'])}~~] → :green[**{md_escape(f['suggestion'])}**]{times}"
+                            + (f"　:gray[{md_escape(f['reason'])}]" if f["reason"] else "")
+                        )
+                        vague_accepted[i] = st.checkbox(label, key=f"vague_{vrun}_{i}")
+                    n_ok = sum(1 for v in vague_accepted.values() if v)
+                    st.caption(f"採用 {n_ok} 件 / 候補 {len(fixable)} 件")
+                    checked_text = apply_vague_fixes(reviewed_text, flags, vague_accepted)
+                if others:
+                    st.markdown("**要確認(修正候補なし。⑥で必要なら手で直してください)**")
+                    for i in others:
+                        f = flags[i]
+                        note = "" if f["count"] else "　:gray[(本文中に同じ文字列が見つかりません)]"
+                        st.markdown(
+                            f"・「{md_escape(f['phrase'])}」"
+                            + (f"　:gray[{md_escape(f['reason'])}]" if f["reason"] else "")
+                            + note
+                        )
+                if not flags:
+                    if vague["raw"].startswith(NO_FLAG_PHRASE):
+                        st.info(vague["raw"])
+                    else:
+                        # 決めた形で答えなかったときは、出力をそのまま見せる
+                        st.warning(vague["raw"])
+                with st.expander("④のLLMの出力全文"):
+                    st.text(vague["raw"])
 
             st.divider()
             st.subheader("⑤ 構造化チェックリスト")
@@ -1759,7 +1853,7 @@ if uploaded_file:
                 "推測による埋め合わせ(confabulation)を避けます。"
             )
 
-            show_background_findings(reviewed_text)
+            show_background_findings(checked_text)
 
             if st.button("重要所見を抽出する"):
                 if not backend_ready:
@@ -1771,7 +1865,7 @@ if uploaded_file:
                     bar = st.progress(0.0, text="抽出中...")
                     start = time.time()
                     st.session_state.findings = extract_structured_findings(
-                        reviewed_text,
+                        checked_text,
                         llm_backend,
                         api_key,
                         local_model_path,
@@ -1781,7 +1875,7 @@ if uploaded_file:
                     )
                     st.session_state.findings_seconds = time.time() - start
                     st.session_state.findings_stats = collect_ollama_stats(start, threading.get_ident())
-                    st.session_state.findings_source = reviewed_text
+                    st.session_state.findings_source = checked_text
                     # 抽出し直したら、前回の入力・チェック状態を引き継がない
                     st.session_state.findings_run = st.session_state.get("findings_run", 0) + 1
 
@@ -1793,7 +1887,7 @@ if uploaded_file:
                             st.session_state.get("findings_stats", []), st.session_state.findings_seconds
                         )
                     )
-                if st.session_state.get("findings_source", "").strip() != reviewed_text.strip():
+                if st.session_state.get("findings_source", "").strip() != checked_text.strip():
                     st.warning(
                         "この所見は、③の修正を採用する前の文章から抽出したものです。その後③の修正の採用や②の手直しで"
                         "文章が変わっています。反映させるには「重要所見を抽出する」で抽出し直してください。"
@@ -1858,8 +1952,8 @@ if uploaded_file:
             st.divider()
             st.subheader("⑥ 最終確認・編集")
             final_text = st.text_area(
-                "補正後テキスト(採用した修正のみ反映。確定前に必ず目視確認・編集してください)",
-                reviewed_text,
+                "補正後テキスト(③④で採用した修正のみ反映。確定前に必ず目視確認・編集してください)",
+                checked_text,
                 height=200,
             )
 
