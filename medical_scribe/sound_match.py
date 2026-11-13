@@ -6,6 +6,7 @@
 import difflib
 import os
 import re
+import unicodedata
 
 TERM_LIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "term_lists")
 
@@ -54,6 +55,13 @@ def build_sound_index(terms: tuple):
         for i in range(len(reading) - 1):
             index.setdefault(reading[i : i + 2], set()).add(idx)
     return entries, index
+
+
+def strip_voicing(reading: str) -> str:
+    """濁点・半濁点を取る(「かんがい」→「かんかい」、「ぱせどう」→「はせとう」)。
+    音声認識は清音・濁音・半濁音をよく取り違える(パセドウ↔バセドウ、感慨↔寛解)ので、
+    この違いだけの読みは「読みが同じ」とみなす。"""
+    return "".join(c for c in unicodedata.normalize("NFD", reading) if c not in "\u3099\u309a")
 
 
 PARTICLE_MID = re.compile(r"[^\u3040-\u309f][はがをにのでともへや][^\u3040-\u309f]")
@@ -124,8 +132,10 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
                     if PARTICLE_MID.search(surface_v) and not HIRAGANA_ANY.search(term):
                         continue
                     ratio = difflib.SequenceMatcher(None, reading_v, term_reading).ratio()
+                    # 読みが同じ(濁点・半濁点の違いだけも含む)なら、以下の「読みが完全一致する場合だけ」の条件を満たす
+                    same = ratio == 1.0 or strip_voicing(reading_v) == strip_voicing(term_reading)
                     # 短い語は読みが完全一致する場合のみ(偶然の一致を避ける)
-                    if ratio < (1.0 if len(term_reading) <= 3 else 0.75):
+                    if not same and ratio < (1.0 if len(term_reading) <= 3 else 0.75):
                         continue
                     # 「は異変」→「排便」のように、助詞などのひらがなで始まる区切りを漢字の用語にしない
                     if HIRAGANA_START.search(surface_v) and not HIRAGANA_START.search(term):
@@ -136,15 +146,15 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
                     # 辞書にある普通の単語(読み変換で1語として扱われる「階段」「判断」「乾燥」等)は、
                     # 読みが完全に同じ場合(「動機」→「動悸」)だけ置き換える。読みが少し違うだけでは
                     # 「階段」→「改善」「判断」→「診断」のような誤った候補ばかりになるため
-                    if ratio < 1.0 and j == i and KANJI.search(surface_v):
+                    if not same and j == i and KANJI.search(surface_v):
                         continue
                     # 送り仮名の付いた単語(「応じ」「話し」)に助詞などが続いただけの区切り(「応じて」)も同じ扱い
                     kanji_toks = [t for t, _ in toks[i : j + 1] if KANJI.search(t)]
-                    if ratio < 1.0 and len(kanji_toks) == 1 and HIRAGANA_ANY.search(kanji_toks[0]):
+                    if not same and len(kanji_toks) == 1 and HIRAGANA_ANY.search(kanji_toks[0]):
                         continue
                     # 用語の一部になっている言葉(「心房細動」の「心房」)はそれ自体が正しい語なので、
                     # 読みが少し違うだけの別の用語(「心臓」)に置き換えない。読みが完全一致する場合は残す
-                    if ratio < 1.0 and any(surface_v in w for w in term_set):
+                    if not same and any(surface_v in w for w in term_set):
                         continue
                     found.append((starts[i], starts[i] + len(surface_v), surface_v, term, ratio))
 
