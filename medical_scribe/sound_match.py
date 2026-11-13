@@ -125,6 +125,13 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
                     term, term_reading = entries[idx]
                     if abs(len(term_reading) - len(reading_v)) > 2 or term in surface_v or surface_v in term:
                         continue
+                    # 数字は会話の内容そのもの(「1週間前」→「就寝前」のような置き換えを防ぐ)。
+                    # 数字を含む用語(遊離T4 など)への置き換えは残す
+                    if re.search(r"[0-9０-９]", surface_v) and not re.search(r"[0-9０-９]", term):
+                        continue
+                    # 数字の直後から始まる区切り(「1週間前」の「週間前」)は単位なので対象外
+                    if starts[i] > 0 and re.match(r"[0-9０-９]", text[starts[i] - 1]) and not re.search(r"[0-9０-９]", term):
+                        continue
                     # 「脈は」→「脈拍」のように、助詞で終わる区切りを漢字で終わる用語と取り違えない
                     if PARTICLE_END.search(surface_v) and not HIRAGANA_END.search(term):
                         continue
