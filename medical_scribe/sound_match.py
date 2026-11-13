@@ -4,6 +4,7 @@
 """
 
 import difflib
+import functools
 import os
 import re
 import unicodedata
@@ -177,6 +178,47 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
                 chosen.append(f)
             used |= span
     return sorted(chosen)
+
+
+@functools.lru_cache(maxsize=4)
+def _term_readings(terms: tuple) -> list:
+    """用語ごとの、濁点・半濁点を除いた読み(用語リストが変わらない限り使い回す)。"""
+    return [(term, strip_voicing("".join(h for _, h in to_reading_tokens(term)))) for term in terms]
+
+
+def relevant_terms(text: str, terms, limit: int = 300, min_ratio: float = 0.75) -> list:
+    """会話の一部分(text)の中に、読みが近い並びが一続きで出てくる用語だけを選ぶ(③④のLLMに渡す手がかり)。
+    用語リストがどれだけ大きくても、その部分に関係しそうな語だけを渡せるので、LLMが速く、迷いにくい。
+    濁点・半濁点は除いて比べる(「感慨」の部分から「寛解」を選べるように)。
+    """
+    terms = tuple(terms)
+    if not terms:
+        return []
+    reading = strip_voicing("".join(h for _, h in to_reading_tokens(text)))
+    positions = {}
+    for i in range(len(reading) - 1):
+        positions.setdefault(reading[i : i + 2], []).append(i)
+    scored = []
+    for k, (term, tr) in enumerate(_term_readings(terms)):
+        if len(tr) < 2:
+            continue
+        best = 0.0
+        # 用語の読みの2文字の組が出てくる場所から、用語と同じ長さの並びを切り出して比べる
+        starts = {p - j for j in range(len(tr) - 1) for p in positions.get(tr[j : j + 2], [])}
+        for st in starts:
+            if st < 0:
+                continue
+            for length in (len(tr) - 1, len(tr), len(tr) + 1):
+                window = reading[st : st + length]
+                if window:
+                    best = max(best, difflib.SequenceMatcher(None, tr, window).ratio())
+            if best == 1.0:
+                break
+        # 短い読み(3文字以下)は偶然の一致が多いので、完全に同じ並びがある場合だけ
+        if best >= (1.0 if len(tr) <= 3 else min_ratio):
+            scored.append((-best, -len(tr), k, term))
+    scored.sort()
+    return [t for *_, t in scored[:limit]]
 
 
 def apply_sound_replacements(text: str, matches: list, accepted_pairs: set) -> str:

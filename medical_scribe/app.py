@@ -516,7 +516,16 @@ def infer_speakers_from_text(segments, backend: str, api_key: str, local_model_p
 
 SPEAKER_CHUNK = 40  # 話者推定で一度にLLMへ渡す文の数
 CHUNK_CHARS = 1200  # ③④⑤で一度にLLMへ渡す文字数の目安
-MAX_CANDIDATE_TERMS = 300  # ③の指示文に載せる用語リストの上限(長すぎると遅くなるため)
+MAX_CANDIDATE_TERMS = 300  # ③④の指示文に載せる用語の上限(会話の部分ごとに、読みが近い語だけを選んだうえでの上限)
+
+
+def hint_terms(text: str, candidate_terms) -> list:
+    """③④でLLMに手がかりとして渡す用語。用語リスト全体ではなく、この部分の会話と読みが近い語だけにする
+    (リストが大きくなっても指示文が長くならず、速く、LLMも関係のない語に置き換えにくい)。"""
+    try:
+        return sound_match.relevant_terms(text, candidate_terms, limit=MAX_CANDIDATE_TERMS)
+    except ImportError:  # 読みの変換(pykakasi)が無い環境では、先頭から上限まで
+        return list(candidate_terms)[:MAX_CANDIDATE_TERMS]
 MAX_CORRECTION_LEN = 15  # ③で1件として受け付ける「元の表記」の最大文字数(語句単位に限る)
 FINDINGS_CHUNK_CHARS = 2500  # ⑤で一度に渡す文字数。長い指示文を毎回読ませる回数を減らして速くする
 CORRECTION_CHUNK_CHARS = 2500  # ③(修正箇所の一覧だけを出力させる)で一度に渡す文字数
@@ -627,7 +636,7 @@ def correct_chunk_with_llm(
 {medical_terms}
 
 誤変換は、次の医学用語のどれかが別の字や似た音の語になっていることが多いです(修正後の候補):
-{"、".join(list(candidate_terms)[:MAX_CANDIDATE_TERMS])}
+{"、".join(hint_terms(raw_text, candidate_terms))}
 
 【例】
 文字起こし:
@@ -771,7 +780,7 @@ def check_vague_terms(text: str, backend: str, api_key: str, local_model_path: s
 
 
 def check_vague_terms_chunk(text: str, backend: str, api_key: str, local_model_path: str, candidate_terms=()) -> str:
-    terms = "、".join(list(candidate_terms)[:MAX_CANDIDATE_TERMS])
+    terms = "、".join(hint_terms(text, candidate_terms))
     term_hint = f"\n誤認識された医学用語の正しい形は、次の用語のどれかであることが多いです:\n{terms}\n" if terms else ""
     prompt = f"""以下は、医師と患者の診察会話を音声認識で文字起こししたテキストです。
 次の2種類の箇所を探して、音声認識の誤りの可能性があるとして指摘してください。
@@ -1583,8 +1592,8 @@ if uploaded_file:
             "チェックを入れたものだけが②以降に反映されます。"
         )
         sound_terms = parse_term_list(sound_terms_raw) + parse_term_list(medical_terms)
-        # ③④のLLMに渡す用語は先頭から MAX_CANDIDATE_TERMS 語までなので、専門の診療科の語を先に、
-        # 語数の多い内科一般を最後に並べる(①-2の音照合は全部の語を使うので順番は関係ない)
+        # 専門の診療科の語を先に、語数の多い内科一般を最後に並べる(③④で読みの近い語が上限を超えたときに
+        # 専門の語が優先されるように。①-2の音照合は全部の語を使うので順番は関係ない)
         for name in sorted(selected_term_files, key=lambda n: "内科一般" in n):
             sound_terms += load_term_file(name)
         if sound_terms_file is not None:
