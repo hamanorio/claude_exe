@@ -1583,7 +1583,9 @@ if uploaded_file:
             "チェックを入れたものだけが②以降に反映されます。"
         )
         sound_terms = parse_term_list(sound_terms_raw) + parse_term_list(medical_terms)
-        for name in selected_term_files:
+        # ③④のLLMに渡す用語は先頭から MAX_CANDIDATE_TERMS 語までなので、専門の診療科の語を先に、
+        # 語数の多い内科一般を最後に並べる(①-2の音照合は全部の語を使うので順番は関係ない)
+        for name in sorted(selected_term_files, key=lambda n: "内科一般" in n):
             sound_terms += load_term_file(name)
         if sound_terms_file is not None:
             content = sound_terms_file.getvalue().decode("utf-8", errors="ignore")
