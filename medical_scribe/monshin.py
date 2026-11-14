@@ -63,6 +63,22 @@ def red_flags(case: dict) -> list:
 # ---------- 次の質問の提案 ----------
 
 
+# 診断の考え方の基本(小さいモデルが、症状を1つずつ別々に説明して、全体をまとめて説明できる疾患を
+# 見落とすことがあったため、医師が普段している考え方を明示する)
+REASONING_PRINCIPLES = """診断の考え方:
+- 症状や所見を1つずつ別々に説明するのではなく、複数の症状・所見をまとめて1つで説明できる疾患を、必ず鑑別に含めて検討してください。
+  (例: 発熱と関節痛と皮疹がそろうなら、それぞれ別の病気より、全部を説明できる1つの疾患を先に考える)
+- 年齢・性別、症状の始まり方(突然・急性・慢性)、先行する出来事(感染、新しい薬、外傷、旅行など)を手がかりにしてください。
+  年齢や性別が分からなければ、早めに確認してください。
+- 主訴ごとに、診断を大きく分ける基本の確認を落とさないでください。例えば:
+  発疹: 分布、押して色が消えるか(紫斑かどうか)、触れて盛り上がっているか、かゆみ・痛み、粘膜の症状
+  胸痛: 突然か、労作との関係、痛みの広がり、呼吸や体位で変わるか、冷汗
+  腹痛: 部位と移動、食事・排便との関係、妊娠の可能性、発熱
+  頭痛: 突然か(今までで最悪か)、発熱・項部硬直、神経の症状
+  発熱: 期間、熱以外の症状のある部位、渡航・接触歴、内服薬
+"""
+
+
 def next_step_prompt(case: dict, n_questions: int = 3) -> str:
     asked = "\n".join(f"- {e['question']}" for e in case["exchanges"] if e["question"] != "(医師のメモ)")
     asked = asked or "(まだありません)"
@@ -85,6 +101,7 @@ def next_step_prompt(case: dict, n_questions: int = 3) -> str:
 - 身体診察で確かめるべきことがあれば、質問の代わりに「診察: 確かめる所見｜見分けたいこと」と書いてかまいません。
 - 書かれていない症状や所見を、あるものとして扱わないでください。
 
+{REASONING_PRINCIPLES}
 【答え方の例】(別の患者の例です。形式だけを参考にしてください)
 鑑別: 急性胃腸炎(高)、急性虫垂炎(中)、尿路結石(低)
 見逃し注意: 異所性妊娠、腸閉塞
@@ -199,14 +216,22 @@ def summary_prompt(case: dict) -> str:
 (結果によって診断や方針が変わるものを優先して)
 
 記録に書かれていない症状や所見を作らないでください。分からないことは「未確認」と書いてください。
+表やHTMLのタグ(<br>など)は使わず、見出しと箇条書き(「- 」で始まる行)だけで書いてください。
 
+{REASONING_PRINCIPLES}
 【問診の記録】
 {history_text(case)}
 """
 
 
+def clean_markdown(text: str) -> str:
+    """画面で文字のまま表示されてしまうHTMLのタグを取り除く(指示しても使うことがあるため)。"""
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    return re.sub(r"</?(?:b|strong|i|em|p|ul|ol|li|span|div)\b[^>]*>", "", text, flags=re.IGNORECASE)
+
+
 def summarize(case: dict, llm) -> str:
-    return llm(summary_prompt(case), SYSTEM).strip()
+    return clean_markdown(llm(summary_prompt(case), SYSTEM)).strip()
 
 
 def case_as_text(case: dict, summary: str = "") -> str:
