@@ -142,14 +142,14 @@ else:
             )
         )
     else:
-        st.caption("鑑別を読み取れませんでした。下の「AIの出力全文」を見てください。")
+        st.caption("鑑別を読み取れませんでした(答え直しも試しました)。質問への答えが増えると出やすくなります。")
     if suggestion["must_not_miss"]:
         st.warning("見逃し注意: " + "、".join(suggestion["must_not_miss"]))
 
     st.subheader("③ 次に聞くとよいこと")
     st.caption("患者さんに聞いて、答えを入力してください。聞かなかった質問は空欄のままで構いません(未確認として扱います)。")
-    if not suggestion["questions"]:
-        st.caption("質問を読み取れませんでした。下の欄に、ご自身で聞いたことを入力できます。")
+    if suggestion.get("fallback"):
+        st.caption("AIが質問を出せなかったので、どの主訴にも使える基本の質問を出しています。")
     for i, q in enumerate(suggestion["questions"]):
         tag = "🩺 診察" if q["kind"] == "診察" else "💬 質問"
         st.markdown(f"{tag} **{q['text']}**")

@@ -45,9 +45,34 @@ def main() -> None:
           "(医師のメモ)" in monshin.next_step_prompt({**case, "exchanges": case["exchanges"] + [
               {"question": "(医師のメモ)", "answer": "x", "source": "医師"}]}).split("【すでに聞いた質問】")[1], False, failures)
 
+    # 鑑別を挙げずに断ったときは1回だけ答え直させ、それでも質問が無ければ定型の質問を出す
+    good = "鑑別: 片頭痛(高)、緊張型頭痛(中)\n見逃し注意: くも膜下出血\n質問: 急に始まりましたか｜くも膜下出血の除外"
+    refuse = "情報が不足しているため、鑑別診断を挙げることはできません。詳しい情報を教えてください。"
+    case2 = monshin.new_case("40歳女性", "頭痛")
+
+    def fake(outputs):
+        calls = []
+
+        def llm(prompt, system):
+            calls.append(prompt)
+            return outputs[len(calls) - 1]
+
+        return llm, calls
+
+    llm, calls = fake([good])
+    r = monshin.suggest_next(case2, llm)
+    check("1回目で読めれば答え直さない", (len(calls), r["retried"], r["fallback"]), (1, False, False), failures)
+    llm, calls = fake([refuse, good])
+    r = monshin.suggest_next(case2, llm)
+    check("断ったら答え直す", (len(calls), r["retried"], [d["name"] for d in r["ddx"]]), (2, True, ["片頭痛", "緊張型頭痛"]), failures)
+    check("答え直しの指示に前回の答えを含める", refuse in calls[1], True, failures)
+    llm, calls = fake([refuse, refuse])
+    r = monshin.suggest_next(case2, llm, n_questions=3)
+    check("2回とも断ったら定型の質問", (r["fallback"], len(r["questions"]), r["ddx"]), (True, 3, []), failures)
+
     for f in failures:
         print("NG", f)
-    print(f"{9 - len(failures)}/9 件OK")
+    print(f"{13 - len(failures)}/13 件OK")
     sys.exit(1 if failures else 0)
 
 

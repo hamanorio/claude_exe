@@ -22,8 +22,10 @@ import ddx_agents
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
 SYSTEM = (
-    "あなたは外来で医師の問診を補助するAIです。医師が患者さんから聞いた情報をもとに、"
+    "あなたは外来で医師の問診を補助するAIです。利用者は医師で、医師が患者さんから聞いた情報をもとに、"
     "鑑別診断を考え、診断を絞り込むために次に聞くべきことを提案します。"
+    "これは医師が自分で判断するための参考情報なので、情報が少ない段階でも、考えられる鑑別を挙げることが適切です。"
+    "「情報が足りないので鑑別を挙げられない」とは答えず、今ある情報で考えられる候補と、絞り込むための質問を必ず示してください。"
     "最終的な判断は医師が行います。"
 )
 
@@ -74,11 +76,21 @@ def next_step_prompt(case: dict, n_questions: int = 3) -> str:
 
 決まりごと:
 - 鑑別は可能性の高い順に3〜5個。(高)(中)(低)で可能性の程度を付けてください。
+- 情報が主訴だけでも、その主訴でよくみられる疾患と危険な疾患から鑑別を挙げてください。
+  確信が持てないときは(低)を付ければよく、「鑑別を挙げられない」とは書かないでください。
+- 質問は必ず1つ以上書いてください。情報が少ないほど、発症時期・経過・部位・随伴症状など基本的な質問が役に立ちます。
 - 質問は最大{n_questions}個。診断を最も大きく絞り込めるもの、危険な疾患を除外するものを優先してください。
 - 質問は、医師がそのまま患者さんに読み上げられる、短く分かりやすい話し言葉にしてください。1つの質問で聞くことは1つにしてください。
 - すでに聞いた質問は繰り返さないでください。
 - 身体診察で確かめるべきことがあれば、質問の代わりに「診察: 確かめる所見｜見分けたいこと」と書いてかまいません。
 - 書かれていない症状や所見を、あるものとして扱わないでください。
+
+【答え方の例】(別の患者の例です。形式だけを参考にしてください)
+鑑別: 急性胃腸炎(高)、急性虫垂炎(中)、尿路結石(低)
+見逃し注意: 異所性妊娠、腸閉塞
+質問: 痛みはどこから始まって、今はどこが痛みますか｜虫垂炎の痛みの移動の有無
+質問: 最後の生理はいつでしたか｜異所性妊娠の除外
+診察: 右下腹部の圧痛と反跳痛｜虫垂炎の可能性
 
 【これまでに分かったこと】
 {history_text(case)}
@@ -116,9 +128,56 @@ def parse_next_step(text: str) -> dict:
     return {"ddx": ddx, "must_not_miss": must_not_miss, "questions": questions}
 
 
+# モデルが質問を出せなかったときに、問診を止めないための定型の質問(OPQRSTなど、どの主訴にも使える基本)
+FALLBACK_QUESTIONS = [
+    ("いつから、どのように始まりましたか(急に・徐々に)", "発症の様式(急性か慢性か)"),
+    ("始まってから、良くなっていますか、悪くなっていますか", "経過"),
+    ("どこが、どのように(痛み・違和感など)つらいですか", "部位と性状"),
+    ("ほかに一緒に出ている症状はありますか(発熱・吐き気・息切れなど)", "随伴症状"),
+    ("持病や、飲んでいる薬、アレルギーはありますか", "既往歴・内服歴・アレルギー"),
+]
+
+
+def retry_prompt(case: dict, n_questions: int, previous: str) -> str:
+    return f"""前回の答えから、鑑別と質問を決めた形で読み取れませんでした。
+利用者は医師で、これは医師が判断するための参考です。情報が少なくても、考えられる鑑別(確信がなければ(低))と、
+絞り込むための質問を挙げてください。次の形だけで答え直してください。
+
+鑑別: 疾患名(高)、疾患名(中)、疾患名(低)
+見逃し注意: 疾患名、疾患名(なければ「なし」)
+質問: 患者さんへの質問文｜この質問で見分けたいこと
+(質問は1〜{n_questions}個)
+
+【前回の答え】
+{previous[:1500]}
+
+{next_step_prompt(case, n_questions)}"""
+
+
 def suggest_next(case: dict, llm, n_questions: int = 3) -> dict:
+    """次の質問を提案させる。鑑別か質問が読み取れなければ1回だけ答え直させ、
+    それでも質問が無ければ定型の質問を出す(問診が止まらないように)。"""
     raw = llm(next_step_prompt(case, n_questions), SYSTEM)
     result = parse_next_step(raw)
+    result["retried"] = False
+    if not result["ddx"] or not result["questions"]:
+        raw2 = llm(retry_prompt(case, n_questions, raw), SYSTEM)
+        result2 = parse_next_step(raw2)
+        # 答え直しで読み取れた部分を使い、読み取れなかった部分は1回目のものを残す
+        result = {
+            "ddx": result2["ddx"] or result["ddx"],
+            "must_not_miss": result2["must_not_miss"] or result["must_not_miss"],
+            "questions": result2["questions"] or result["questions"],
+            "retried": True,
+        }
+        raw = f"{raw}\n\n--- 答え直し ---\n{raw2}"
+    result["fallback"] = False
+    if not result["questions"]:
+        asked = {e["question"] for e in case["exchanges"]}
+        result["questions"] = [
+            {"kind": "質問", "text": q, "purpose": p} for q, p in FALLBACK_QUESTIONS if q not in asked
+        ][:n_questions]
+        result["fallback"] = True
     result["raw"] = raw
     return result
 
