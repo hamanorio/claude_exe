@@ -80,9 +80,20 @@ def main() -> None:
     check("未確認の項目を指示文に入れる", "腹痛・関節痛" in monshin.next_step_prompt(c3), True, failures)
     check("当てはまる主訴がなければリストなし", monshin.checklists(monshin.new_case("", "眠れない")), [], failures)
 
+    # 型の穴埋めや壊れた出力は読み取らない(弾いた結果空になれば、答え直しの仕組みが働く)
+    broken = "鑑別: [list]、線維筋痛症? No.、線維筋痛症? No.\n見逃し注意: [list]\n質問: [question]\n質問: 患者さんへの質問文｜この質問で見分けたいこと"
+    r = monshin.parse_next_step(broken)
+    check("壊れた出力は読み取らない", (r["ddx"], r["must_not_miss"], r["questions"]), ([], [], []), failures)
+    r = monshin.parse_next_step("鑑別: 片頭痛(高)、片頭痛(中)\n質問: 急に始まりましたか？｜除外\n質問: 急に始まりましたか？｜除外")
+    check("重複はまとめ、質問文の？は残す", ([d["name"] for d in r["ddx"]], [q["text"] for q in r["questions"]]),
+          (["片頭痛"], ["急に始まりましたか？"]), failures)
+    llm, calls = fake([broken, good])
+    r = monshin.suggest_next(case2, llm)
+    check("壊れた出力なら答え直す", (len(calls), [d["name"] for d in r["ddx"]]), (2, ["片頭痛", "緊張型頭痛"]), failures)
+
     for f in failures:
         print("NG", f)
-    print(f"{18 - len(failures)}/18 件OK")
+    print(f"{21 - len(failures)}/21 件OK")
     sys.exit(1 if failures else 0)
 
 

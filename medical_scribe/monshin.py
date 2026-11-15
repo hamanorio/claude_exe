@@ -257,6 +257,14 @@ def _split_items(text: str) -> list:
     return [x.strip(" *・") for x in re.split(r"[、,，]", text) if x.strip(" *・")]
 
 
+# 答え方の型をそのまま書き写した穴埋め(「[list]」「疾患名」など)や、壊れた出力(「? No.」の繰り返し)を弾く
+PLACEHOLDER = re.compile(r"[\[\]?？]|\bNo\.|^(?:疾患名|病名|list|question|患者さんへの質問文|確かめる所見|なし)$", re.IGNORECASE)
+
+
+def _valid(item: str) -> bool:
+    return bool(item) and not PLACEHOLDER.search(item)
+
+
 def parse_next_step(text: str) -> dict:
     """提案の出力を読み取る。返り値: {"ddx": [{"name", "level"}], "must_not_miss": [...], "questions": [{"kind","text","purpose"}]}"""
     ddx, must_not_miss, questions = [], [], []
@@ -270,14 +278,17 @@ def parse_next_step(text: str) -> dict:
             for item in _split_items(body):
                 lv = re.search(r"[（(]\s*(高|中|低)\s*[)）]", item)
                 name = re.sub(r"[（(]\s*(高|中|低)\s*[)）]", "", item).strip()
-                if name:
+                if _valid(name) and name not in [d["name"] for d in ddx]:
                     ddx.append({"name": name, "level": lv.group(1) if lv else ""})
         elif label == "見逃し注意":
-            must_not_miss = [x for x in _split_items(body) if x not in ("なし", "特になし")]
+            must_not_miss = list(dict.fromkeys(x for x in _split_items(body) if x not in ("なし", "特になし") and _valid(x)))
         else:
             text_, _, purpose = body.partition("｜") if "｜" in body else body.partition("|")
-            if text_.strip():
-                questions.append({"kind": label, "text": text_.strip(), "purpose": purpose.strip()})
+            q = text_.strip()
+            # 質問文の「？」は正しいので、穴埋めの判定は「[ ]」と型の言葉だけで行う
+            if q and not re.search(r"[\[\]]", q) and q not in ("患者さんへの質問文", "確かめる所見", "question") \
+                    and q not in [x["text"] for x in questions]:
+                questions.append({"kind": label, "text": q, "purpose": purpose.strip()})
     return {"ddx": ddx, "must_not_miss": must_not_miss, "questions": questions}
 
 
