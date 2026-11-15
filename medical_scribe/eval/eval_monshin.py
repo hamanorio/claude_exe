@@ -166,6 +166,7 @@ def main() -> None:
     ap.add_argument("--n-questions", type=int, default=3)
     ap.add_argument("--only", nargs="*", default=None, help="この症例だけ評価する(症例のid)")
     ap.add_argument("--compare", default="", help="直す前のコミット。指定すると、そのときの指示文と今の指示文の両方で評価する")
+    ap.add_argument("--repeat", type=int, default=1, help="各症例を何回ずつ評価するか(ばらつきを見るため。3回なら時間も3倍)")
     ap.add_argument("--out", default="monshin_eval.csv")
     args = ap.parse_args()
 
@@ -181,7 +182,7 @@ def main() -> None:
     if args.compare:
         versions.insert(0, (f"直す前({args.compare})", load_monshin_at(args.compare)))
 
-    fields = ["version", "case", "gold", "last_ddx", "gold_in_last_ddx", "gold_in_summary_ddx",
+    fields = ["version", "case", "trial", "gold", "last_ddx", "gold_in_last_ddx", "gold_in_summary_ddx",
               "gold_in_summary_any", "first_hit_round", "seconds", "n_calls", "assistant_seconds",
               "patient_seconds", "slowest_call", "n_retried_low", "log", "summary"]
     rows = []
@@ -189,15 +190,16 @@ def main() -> None:
         writer = csv.DictWriter(fh, fieldnames=fields)
         writer.writeheader()
         for vname, mod in versions:
-            for case in cases:
-                print(f"[{vname}] {case['id']} …", end="", flush=True)
+            for case, trial in [(c, t) for c in cases for t in range(1, args.repeat + 1)]:
+                label = f"{case['id']}" + (f" ({trial}/{args.repeat}回目)" if args.repeat > 1 else "")
+                print(f"[{vname}] {label} …", end="", flush=True)
                 start = time.time()
                 try:
                     res = run_case(mod, case, doctor_llm, patient_llm, args.rounds, args.n_questions)
                 except Exception as e:  # 1件の失敗で全体を止めない
                     print(f" エラー: {e}")
                     continue
-                row = {"version": vname, "case": case["id"], "gold": case["gold"][0],
+                row = {"version": vname, "case": case["id"], "trial": trial, "gold": case["gold"][0],
                        "seconds": round(time.time() - start), **res}
                 writer.writerow(row)
                 fh.flush()
@@ -218,7 +220,16 @@ def main() -> None:
             f"{vname}: 最後の提案の鑑別に正解 {sum(r['gold_in_last_ddx'] for r in rs)}/{n}"
             f"  まとめの鑑別に正解 {sum(r['gold_in_summary_ddx'] for r in rs)}/{n}"
             f"  まとめ(鑑別か見逃し注意)に正解 {sum(r['gold_in_summary_any'] for r in rs)}/{n}"
+            f"  平均{sum(r['seconds'] for r in rs) / n:.0f}秒/回"
         )
+        if args.repeat > 1:
+            # 症例ごとに、何回中何回まとめで正解したか(ばらつきの大きい症例が分かる)
+            per_case = ", ".join(
+                f"{c['id']} {sum(r['gold_in_summary_any'] for r in rs if r['case'] == c['id'])}"
+                f"/{sum(1 for r in rs if r['case'] == c['id'])}"
+                for c in cases
+            )
+            print(f"  症例ごと(まとめに正解した回数): {per_case}")
     print(f"\n問診のやり取りとまとめの全文は {args.out} に保存しました。")
 
 
