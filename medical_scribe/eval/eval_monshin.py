@@ -134,9 +134,15 @@ def run_case(mod, case: dict, doctor_raw, patient_raw, rounds: int, n_questions:
             f"{slowest['role']} {slowest['seconds']:.0f}秒"
             f"(読み込み{slowest.get('load_s', 0):.0f}秒・入力{slowest.get('prompt_tokens', 0)}トークン"
             f"・出力{slowest.get('output_tokens', 0)}トークン/{slowest.get('output_s', 0):.0f}秒)"
+            + (
+                f" ※考えすぎて答えが空になり、lowでやり直し(1回目 出力{slowest.get('first_output_tokens', 0)}トークン)"
+                if slowest.get("retried_low")
+                else ""
+            )
             if slowest
             else ""
         ),
+        "n_retried_low": sum(1 for x in calls if x.get("retried_low")),
         "last_ddx": "、".join(last_ddx),
         "gold_in_last_ddx": has_gold("、".join(last_ddx), case["gold"]),
         "gold_in_summary_ddx": has_gold(section(summary, ("鑑別",)), case["gold"]),
@@ -174,7 +180,7 @@ def main() -> None:
 
     fields = ["version", "case", "gold", "last_ddx", "gold_in_last_ddx", "gold_in_summary_ddx",
               "gold_in_summary_any", "first_hit_round", "seconds", "n_calls", "assistant_seconds",
-              "patient_seconds", "slowest_call", "log", "summary"]
+              "patient_seconds", "slowest_call", "n_retried_low", "log", "summary"]
     rows = []
     with open(args.out, "w", encoding="utf-8-sig", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
@@ -196,6 +202,8 @@ def main() -> None:
                 mark = "○" if row["gold_in_summary_any"] else "×"
                 print(f" {row['seconds']}秒 まとめに正解:{mark} 最後の鑑別: {row['last_ddx']}")
                 print(f"    いちばん遅い呼び出し: {row['slowest_call']}")
+                if row["n_retried_low"]:
+                    print(f"    考えすぎて答えが空になり、lowでやり直した回数: {row['n_retried_low']}")
 
     print("\n=== 集計 ===")
     for vname, _ in versions:

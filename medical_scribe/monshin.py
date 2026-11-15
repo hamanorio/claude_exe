@@ -393,21 +393,23 @@ def strip_thinking(text: str) -> str:
 
 def ollama_llm(model: str, think: str = "low", num_ctx: int = 16384, max_tokens: int = 8192, timeout: int = 300):
     """llm(prompt, system) を返す。データはMacの外に出ない。
-    gpt-oss は考える量(low/medium/high)、Qwen3 は true/false を think で指定する。"""
+    gpt-oss は考える量(low/medium/high)、Qwen3 は true/false を think で指定する。
+    gpt-oss は考える分も出力の上限(max_tokens)に含まれるので、考えているうちに上限に達して答えが空になることがある。
+    そのときは考える量を low に下げて、1回だけやり直す。"""
 
-    def call(prompt: str, system: str) -> str:
+    def once(prompt: str, system: str, think_value: str):
         payload = {
             "model": model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
             "stream": True,
             "options": {"temperature": 0, "num_ctx": num_ctx, "num_predict": max_tokens},
         }
-        if think:
-            payload["think"] = {"true": True, "false": False}.get(think, think)
+        if think_value:
+            payload["think"] = {"true": True, "false": False}.get(think_value, think_value)
         req = urllib.request.Request(
             OLLAMA_URL, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}
         )
-        parts = []
+        parts, stats = [], {}
         try:
             # 少しずつ受け取るので、考える時間が長くても途中でタイムアウトしない
             with urllib.request.urlopen(req, timeout=timeout) as res:
@@ -417,18 +419,30 @@ def ollama_llm(model: str, think: str = "low", num_ctx: int = 16384, max_tokens:
                     msg = json.loads(line.decode("utf-8"))
                     parts.append(msg.get("message", {}).get("content", ""))
                     if msg.get("done"):
-                        # 時間の内訳(評価で遅い呼び出しを調べるため)。単位はナノ秒
-                        call.last_stats = {
+                        # 時間の内訳(遅い呼び出しを調べるため)。単位はナノ秒
+                        stats = {
                             "load_s": msg.get("load_duration", 0) / 1e9,
                             "prompt_tokens": msg.get("prompt_eval_count", 0),
                             "prompt_s": msg.get("prompt_eval_duration", 0) / 1e9,
                             "output_tokens": msg.get("eval_count", 0),
                             "output_s": msg.get("eval_duration", 0) / 1e9,
+                            "done_reason": msg.get("done_reason", ""),
                         }
                         break
         except urllib.error.HTTPError as e:
             raise RuntimeError(f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}") from e
-        return strip_thinking("".join(parts))
+        return strip_thinking("".join(parts)), stats
+
+    def call(prompt: str, system: str) -> str:
+        text, stats = once(prompt, system, think)
+        if not text and think in ("medium", "high"):
+            # 考えているうちに上限に達して答えが空になった。考える量を減らしてやり直す
+            first = stats
+            text, stats = once(prompt, system, "low")
+            stats = {**stats, "retried_low": True, "first_output_tokens": first.get("output_tokens", 0),
+                     "first_output_s": first.get("output_s", 0)}
+        call.last_stats = stats
+        return text
 
     call.last_stats = {}
     return call
