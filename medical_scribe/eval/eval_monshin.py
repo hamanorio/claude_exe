@@ -67,12 +67,33 @@ def load_monshin_at(commit: str):
 
 
 def normalize(text: str) -> str:
-    return re.sub(r"[\s・･()（）「」、。,]", "", text)
+    return re.sub(r"[\s・･()（）「」、。,\-‐‑–]", "", text).lower()
 
 
 def has_gold(text: str, gold: list) -> bool:
+    """正解の病名(日本語・英語の別名を含む)が出てくるか。短い英字の略語(PE、SAHなど)は単語として一致したときだけ。"""
     t = normalize(text)
-    return any(normalize(g) in t for g in gold)
+    for g in gold:
+        if re.fullmatch(r"[A-Za-z]{2,4}", g):
+            if re.search(rf"(?<![A-Za-z]){g}(?![A-Za-z])", text):
+                return True
+        elif normalize(g) in t:
+            return True
+    return False
+
+
+class TimedLLM:
+    """LLMの呼び出しごとの時間を記録する(極端に遅い呼び出しを見つけるため)。"""
+
+    def __init__(self, llm, role: str):
+        self.llm, self.role, self.calls = llm, role, []
+
+    def __call__(self, prompt: str, system: str) -> str:
+        start = time.time()
+        out = self.llm(prompt, system)
+        st = getattr(self.llm, "last_stats", {}) or {}
+        self.calls.append({"role": self.role, "seconds": time.time() - start, **st})
+        return out
 
 
 def section(summary: str, names: tuple) -> str:
@@ -87,7 +108,8 @@ def section(summary: str, names: tuple) -> str:
     return "\n".join(out)
 
 
-def run_case(mod, case: dict, doctor_llm, patient_llm, rounds: int, n_questions: int) -> dict:
+def run_case(mod, case: dict, doctor_raw, patient_raw, rounds: int, n_questions: int) -> dict:
+    doctor_llm, patient_llm = TimedLLM(doctor_raw, "アシスタント"), TimedLLM(patient_raw, "患者役")
     c = mod.new_case(case["patient"], case["chief_complaint"])
     first_hit, last_ddx, log = None, [], []
     for r in range(1, rounds + 1):
@@ -102,7 +124,19 @@ def run_case(mod, case: dict, doctor_llm, patient_llm, rounds: int, n_questions:
             mod.add_exchange(c, label, answer)
             log.append(f"  Q: {label}\n  A: {answer}")
     summary = mod.summarize(c, doctor_llm)
+    calls = doctor_llm.calls + patient_llm.calls
+    slowest = max(calls, key=lambda x: x["seconds"]) if calls else {}
     return {
+        "n_calls": len(calls),
+        "assistant_seconds": round(sum(x["seconds"] for x in doctor_llm.calls)),
+        "patient_seconds": round(sum(x["seconds"] for x in patient_llm.calls)),
+        "slowest_call": (
+            f"{slowest['role']} {slowest['seconds']:.0f}秒"
+            f"(読み込み{slowest.get('load_s', 0):.0f}秒・入力{slowest.get('prompt_tokens', 0)}トークン"
+            f"・出力{slowest.get('output_tokens', 0)}トークン/{slowest.get('output_s', 0):.0f}秒)"
+            if slowest
+            else ""
+        ),
         "last_ddx": "、".join(last_ddx),
         "gold_in_last_ddx": has_gold("、".join(last_ddx), case["gold"]),
         "gold_in_summary_ddx": has_gold(section(summary, ("鑑別",)), case["gold"]),
@@ -139,7 +173,8 @@ def main() -> None:
         versions.insert(0, (f"直す前({args.compare})", load_monshin_at(args.compare)))
 
     fields = ["version", "case", "gold", "last_ddx", "gold_in_last_ddx", "gold_in_summary_ddx",
-              "gold_in_summary_any", "first_hit_round", "seconds", "log", "summary"]
+              "gold_in_summary_any", "first_hit_round", "seconds", "n_calls", "assistant_seconds",
+              "patient_seconds", "slowest_call", "log", "summary"]
     rows = []
     with open(args.out, "w", encoding="utf-8-sig", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
@@ -160,6 +195,7 @@ def main() -> None:
                 rows.append(row)
                 mark = "○" if row["gold_in_summary_any"] else "×"
                 print(f" {row['seconds']}秒 まとめに正解:{mark} 最後の鑑別: {row['last_ddx']}")
+                print(f"    いちばん遅い呼び出し: {row['slowest_call']}")
 
     print("\n=== 集計 ===")
     for vname, _ in versions:

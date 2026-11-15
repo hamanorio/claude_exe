@@ -70,9 +70,19 @@ def main() -> None:
     r = monshin.suggest_next(case2, llm, n_questions=3)
     check("2回とも断ったら定型の質問", (r["fallback"], len(r["questions"]), r["ddx"]), (True, 3, []), failures)
 
+    # 主訴ごとの確認リスト: 主訴で選ばれ、聞いた項目に印が付き、まだの項目が指示文に入る
+    c3 = monshin.new_case("9歳男児", "両足に発疹が出ている")
+    check("発疹のリストが選ばれる", [x["complaint"] for x in monshin.checklists(c3)], ["発疹"], failures)
+    monshin.add_exchange(c3, "押すと色は消えますか", "消えません")
+    items = {i["label"]: i["asked"] for i in monshin.checklists(c3)[0]["items"]}
+    check("聞いた項目に印", items["押して色が消えるか(紫斑かどうか)"], True, failures)
+    check("聞いていない項目は未確認", items["腹痛・関節痛"], False, failures)
+    check("未確認の項目を指示文に入れる", "腹痛・関節痛" in monshin.next_step_prompt(c3), True, failures)
+    check("当てはまる主訴がなければリストなし", monshin.checklists(monshin.new_case("", "眠れない")), [], failures)
+
     for f in failures:
         print("NG", f)
-    print(f"{13 - len(failures)}/13 件OK")
+    print(f"{18 - len(failures)}/18 件OK")
     sys.exit(1 if failures else 0)
 
 

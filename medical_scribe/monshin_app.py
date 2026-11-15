@@ -128,6 +128,15 @@ if flags:
 st.markdown(f"**患者**: {case['patient'] or '(未入力)'}　**主訴**: {case['chief_complaint']}")
 st.caption(f"これまでに記録した答え: {len(case['exchanges'])}件")
 
+# 主訴ごとの基本の確認項目(決まった表から出す。AIが聞き忘れても気づけるように)
+for cl in monshin.checklists(case):
+    done = sum(i["asked"] for i in cl["items"])
+    with st.expander(f"「{cl['complaint']}」で確認したい基本項目({done}/{len(cl['items'])} 確認済み)", expanded=True):
+        st.markdown(
+            "\n".join(f"- {'✅' if i['asked'] else '⬜'} {i['label']}" for i in cl["items"])
+        )
+        st.caption("✅ は、質問か答えに関係する言葉があったものです(目安)。⬜ の項目は、AIの提案になくても必要なら聞いてください。")
+
 if suggestion is None:
     if st.button("もう一度AIに提案させる"):
         run_suggest()
