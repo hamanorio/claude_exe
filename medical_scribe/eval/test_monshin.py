@@ -91,9 +91,14 @@ def main() -> None:
     r = monshin.suggest_next(case2, llm)
     check("壊れた出力なら答え直す", (len(calls), [d["name"] for d in r["ddx"]]), (2, ["片頭痛", "緊張型頭痛"]), failures)
 
+    # 痛みの訴えには、部位別のリストに加えて共通の痛みのリスト(性質・皮膚など)を出す
+    c4 = monshin.new_case("72歳女性", "右の脇腹が痛い")
+    check("痛みの共通リストも出す", [x["complaint"] for x in monshin.checklists(c4)], ["腹痛", "痛み(共通)"], failures)
+    check("痛む場所の皮膚を未確認として指示文に入れる", "痛む場所の皮膚" in monshin.next_step_prompt(c4), True, failures)
+
     for f in failures:
         print("NG", f)
-    print(f"{21 - len(failures)}/21 件OK")
+    print(f"{23 - len(failures)}/23 件OK")
     sys.exit(1 if failures else 0)
 
 
