@@ -98,3 +98,11 @@ NOTION_DATABASE_ID=    # optional
 ```
 
 **Architecture:** `public/` (static frontend) ↔ `api/index.py` (FastAPI routes) ↔ `api/ai.py` (Gemini) / `api/notion.py` (Notion persistence).
+
+---
+
+### 6. `monshin/` — 問診まとめ帳 (medical intake summary tool)
+
+A single static page (`monshin/index.html`, HTML/CSS/JS inline, no build step, no dependencies besides Google Fonts). The intake form updates a chart-ready summary live, flags items needing attention (SpO2 < 95, fever, high BP, allergy, anticoagulants, pregnancy, Brinkman index, etc.) and copies a plain-text version. Form drafts autosave to `localStorage` (`monshin-draft-v1`). Prototype only: sample data is fictional, no real patient data, no diagnosis.
+
+**Deployed at (after merge to `main`):** `https://hamanorio.github.io/claude_exe/Claude_Code/monshin/`
