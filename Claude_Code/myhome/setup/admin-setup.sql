@@ -68,7 +68,12 @@ create policy "admin update projects" on public.projects
 create policy "admin delete projects" on public.projects
     for delete to authenticated using (public.is_admin());
 
--- 6. 自分を管理者に登録（メールアドレスを書き換えてください）
+-- 6. ログインした人が表に書き込むための基本の権限
+--    （実際に書き込めるのは、上の設定で管理者だけに絞られています）
+grant select, insert, update, delete on public.posts, public.projects to authenticated;
+grant usage, select on all sequences in schema public to authenticated;
+
+-- 7. 自分を管理者に登録（メールアドレスを書き換えてください）
 insert into public.admins (user_id)
 select id from auth.users where email = 'YOUR_EMAIL@example.com'
 on conflict do nothing;

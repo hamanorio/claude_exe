@@ -246,6 +246,14 @@
         const showMsg = (el, type, html) => { $(el).innerHTML = html ? `<div class="msg ${type}">${html}</div>` : ''; };
 
         function explain(error) {
+            const text = explain0(error);
+            const m = (error && (error.message || error.error_description)) || '';
+            // 原因を調べやすいよう、Supabaseからの元のメッセージも小さく表示する
+            return m && m !== 'permission' && !text.includes(esc(m))
+                ? `${text}<br><small style="opacity:.8">詳細：${esc(m)}${error.code ? ' (' + esc(error.code) + ')' : ''}</small>`
+                : text;
+        }
+        function explain0(error) {
             const m = (error && (error.message || error.error_description)) || String(error);
             if (/Invalid login credentials/i.test(m)) return 'メールアドレスかパスワードが違います。';
             if (/Email not confirmed/i.test(m)) return 'メールアドレスの確認が済んでいません。Supabaseでユーザーを作るときに「Auto Confirm User」をオンにしてください。';
@@ -440,7 +448,7 @@
                     const blob = await shrink(newFiles[i]);
                     const name = fileName(blob, newFiles[i]);
                     const { error } = await db.storage.from(BUCKET).upload(name, blob, { contentType: blob.type || undefined });
-                    if (error) throw error;
+                    if (error) { error.message = '[画像のアップロード] ' + (error.message || ''); throw error; }
                     uploaded.push(name);
                 }
                 showMsg('form-msg', 'info', '保存しています...');
