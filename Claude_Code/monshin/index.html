@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>問診まとめ帳</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&family=Zen+Kaku+Gothic+New:wght@500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: 左に問診票、右にカルテ用サマリー（スマホでは縦に並ぶ）。入力すると即時にまとまる */
+:root {
+  --bg: #f3f6f6;
+  --panel: #ffffff;
+  --ink: #1b2a2e;
+  --muted: #5d6f73;
+  --line: #d5dfe0;
+  --accent: #0f6e78;
+  --accent-soft: #e1f0f1;
+  --warn: #a35a00;
+  --warn-soft: #fbefdc;
+  --crit: #b3261e;
+  --crit-soft: #fbe5e3;
+  --ok: #2f7a3e;
+  --font-display: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic", sans-serif;
+  --font-body: "BIZ UDPGothic", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111a1c; --panel: #182427; --ink: #e3ecec; --muted: #9aaeb1; --line: #2c3c3f;
+    --accent: #5cc3cc; --accent-soft: #173538; --warn: #f0b05a; --warn-soft: #3a2a12;
+    --crit: #ff8a80; --crit-soft: #3d1c1a; --ok: #7fcf8c; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111a1c; --panel: #182427; --ink: #e3ecec; --muted: #9aaeb1; --line: #2c3c3f;
+  --accent: #5cc3cc; --accent-soft: #173538; --warn: #f0b05a; --warn-soft: #3a2a12;
+  --crit: #ff8a80; --crit-soft: #3d1c1a; --ok: #7fcf8c; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.7;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px 48px;
+}
+.wrap { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
+h1 { font-family: var(--font-display); font-weight: 700; font-size: 1.7rem; margin: 0; letter-spacing: .02em; text-wrap: balance; }
+.lead { margin: 4px 0 0; color: var(--muted); max-width: 60ch; }
+.notice { font-size: .82rem; color: var(--warn); background: var(--warn-soft); border-radius: 6px; padding: 6px 10px; }
+.grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 860px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+
+form { display: flex; flex-direction: column; gap: 16px; }
+fieldset { margin: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 14px 16px 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 14px; min-width: 0; }
+@media (max-width: 520px) { fieldset { grid-template-columns: minmax(0, 1fr); } }
+legend { font-family: var(--font-display); font-weight: 700; font-size: .95rem; color: var(--accent); padding: 0 6px; }
+.field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.field.full { grid-column: 1 / -1; }
+label, .lbl { font-size: .82rem; color: var(--muted); font-weight: 700; }
+input, select, textarea {
+  font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; width: 100%; min-width: 0;
+}
+textarea { resize: vertical; min-height: 64px; }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.num { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+.unit { display: flex; align-items: center; gap: 6px; }
+.unit span { font-size: .8rem; color: var(--muted); white-space: nowrap; }
+.nrs { display: flex; align-items: center; gap: 10px; }
+.nrs input { padding: 0; accent-color: var(--accent); background: none; border: 0; }
+.nrs output { font-family: var(--font-data); font-weight: 500; min-width: 3.5ch; text-align: right; }
+.checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.checks label { display: flex; align-items: center; gap: 6px; font-weight: 400; color: var(--ink); font-size: .9rem; }
+.checks input { width: auto; accent-color: var(--accent); }
+
+.summary { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.sum-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--accent-soft); }
+.sum-head h2 { font-family: var(--font-display); font-size: 1.05rem; margin: 0; }
+.btns { display: flex; gap: 8px; flex-wrap: wrap; }
+button { font: inherit; font-size: .85rem; font-weight: 700; border-radius: 7px; padding: 6px 14px; cursor: pointer; border: 1px solid var(--accent); }
+.primary { background: var(--accent); color: var(--panel); }
+.ghost { background: transparent; color: var(--accent); }
+.flags { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 16px 0; }
+.chip { font-size: .8rem; font-weight: 700; border-radius: 999px; padding: 2px 10px; }
+.chip.crit { color: var(--crit); background: var(--crit-soft); }
+.chip.warn { color: var(--warn); background: var(--warn-soft); }
+.chip.ok { color: var(--ok); background: var(--accent-soft); }
+.sum-body { padding: 12px 16px 16px; }
+.sum-body dl { margin: 0; display: grid; grid-template-columns: 6.5em minmax(0, 1fr); gap: 6px 12px; }
+.sum-body dt { font-size: .8rem; font-weight: 700; color: var(--muted); padding-top: 2px; }
+.sum-body dd { margin: 0; overflow-wrap: anywhere; }
+.sum-body dd.empty { color: var(--muted); }
+.vitals { font-family: var(--font-data); font-variant-numeric: tabular-nums; font-size: .9rem; }
+.vitals .hi { color: var(--crit); font-weight: 500; }
+.plain { margin-top: 14px; }
+.plain summary { cursor: pointer; font-size: .82rem; color: var(--muted); font-weight: 700; }
+pre { white-space: pre-wrap; font-family: var(--font-data); font-size: .82rem; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 10px; margin: 8px 0 0; }
+.toast { font-size: .8rem; color: var(--ok); min-height: 1.2em; }
+@media (prefers-reduced-motion: no-preference) { .chip { transition: background .2s; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>問診まとめ帳</h1>
+      <p class="lead">問診票を入力すると、右側にカルテへ貼り付けやすい形でまとめます。気をつける項目は色つきで表示します。</p>
+    </div>
+    <div class="notice">試作版です。最初の内容は架空の例です。実際の患者情報は入力しないでください。診断はしません。<br>入力内容はこの端末のブラウザにだけ一時保存されます。</div>
+  </header>
+
+  <div class="grid">
+    <form id="f" autocomplete="off">
+      <fieldset>
+        <legend>基本情報</legend>
+        <div class="field"><label for="age">年齢</label><div class="unit"><input id="age" class="num" type="number" min="0" max="120" value="68"><span>歳</span></div></div>
+        <div class="field"><label for="sex">性別</label>
+          <select id="sex"><option>男性</option><option selected>女性</option><option>その他・回答しない</option></select></div>
+        <div class="field full" id="pregWrap"><label for="preg">妊娠の可能性</label>
+          <select id="preg"><option value="">未回答</option><option>なし</option><option>あり</option><option>わからない</option></select></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>今日の症状</legend>
+        <div class="field full"><label for="cc">いちばんつらい症状（主訴）</label><input id="cc" value="咳と熱"></div>
+        <div class="field"><label for="onset">いつから</label><input id="onset" value="3日前から"></div>
+        <div class="field"><label for="course">経過</label>
+          <select id="course"><option>悪くなっている</option><option>変わらない</option><option>良くなっている</option></select></div>
+        <div class="field full"><label for="detail">くわしい様子</label><textarea id="detail">黄色い痰が出る。夜に咳がひどく眠れない。階段で息が切れる。</textarea></div>
+        <div class="field full"><span class="lbl">つらさ（0＝なし、10＝最悪）</span>
+          <div class="nrs"><input id="nrs" type="range" min="0" max="10" value="6" aria-label="つらさ"><output id="nrsOut" for="nrs">6/10</output></div></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>測定値</legend>
+        <div class="field"><label for="bt">体温</label><div class="unit"><input id="bt" class="num" type="number" step="0.1" value="38.2"><span>℃</span></div></div>
+        <div class="field"><label for="spo2">SpO₂</label><div class="unit"><input id="spo2" class="num" type="number" value="94"><span>%</span></div></div>
+        <div class="field"><label for="sbp">血圧（上）</label><div class="unit"><input id="sbp" class="num" type="number" value="142"><span>mmHg</span></div></div>
+        <div class="field"><label for="dbp">血圧（下）</label><div class="unit"><input id="dbp" class="num" type="number" value="84"><span>mmHg</span></div></div>
+        <div class="field"><label for="hr">脈拍</label><div class="unit"><input id="hr" class="num" type="number" value="96"><span>回/分</span></div></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>これまでの病気・お薬</legend>
+        <div class="field full"><span class="lbl">かかったことのある病気</span>
+          <div class="checks" id="hx">
+            <label><input type="checkbox" value="高血圧" checked>高血圧</label>
+            <label><input type="checkbox" value="糖尿病" checked>糖尿病</label>
+            <label><input type="checkbox" value="脂質異常症">脂質異常症</label>
+            <label><input type="checkbox" value="喘息">喘息</label>
+            <label><input type="checkbox" value="心臓病">心臓病</label>
+            <label><input type="checkbox" value="脳卒中">脳卒中</label>
+            <label><input type="checkbox" value="がん">がん</label>
+          </div></div>
+        <div class="field full"><label for="hxOther">そのほか・手術歴</label><input id="hxOther" value="2015年 胆のう摘出術"></div>
+        <div class="field full"><label for="meds">飲んでいるお薬</label><textarea id="meds">アムロジピン 5mg 1日1回
+メトホルミン 500mg 1日2回
+ワルファリン 2mg 1日1回</textarea></div>
+        <div class="field full"><label for="allergy">アレルギー（薬・食べ物）</label><input id="allergy" value="ペニシリンで発疹"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>生活習慣</legend>
+        <div class="field"><label for="cig">たばこ（1日の本数）</label><div class="unit"><input id="cig" class="num" type="number" min="0" value="10"><span>本/日</span></div></div>
+        <div class="field"><label for="cigY">吸っている年数</label><div class="unit"><input id="cigY" class="num" type="number" min="0" value="40"><span>年</span></div></div>
+        <div class="field full"><label for="alc">お酒</label>
+          <select id="alc"><option>飲まない</option><option selected>ときどき</option><option>毎日</option></select></div>
+      </fieldset>
+    </form>
+
+    <aside class="summary" aria-live="polite">
+      <div class="sum-head">
+        <h2>カルテ用サマリー</h2>
+        <div class="btns">
+          <button type="button" class="ghost" id="clear">空にする</button>
+          <button type="button" class="primary" id="copy">コピー</button>
+        </div>
+      </div>
+      <div class="flags" id="flags"></div>
+      <div class="sum-body">
+        <dl id="dl"></dl>
+        <details class="plain"><summary>テキスト形式で見る</summary><pre id="txt"></pre></details>
+        <div class="toast" id="toast"></div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const v = id => $(id).value.trim();
+const n = id => { const x = parseFloat($(id).value); return isNaN(x) ? null : x; };
+const anticoag = ["ワルファリン","ワーファリン","アピキサバン","エリキュース","リバーロキサバン","イグザレルト","エドキサバン","リクシアナ","ダビガトラン","プラザキサ","アスピリン","バイアスピリン","クロピドグレル","プラビックス"];
+
+function build() {
+  $("nrsOut").textContent = $("nrs").value + "/10";
+  const female = $("sex").value === "女性";
+  $("pregWrap").hidden = !female;
+
+  const age = n("age"), bt = n("bt"), spo2 = n("spo2"), sbp = n("sbp"), dbp = n("dbp"), hr = n("hr"), nrs = +$("nrs").value;
+  const cig = n("cig") || 0, cigY = n("cigY") || 0, bi = cig * cigY;
+  const hx = [...document.querySelectorAll("#hx input:checked")].map(i => i.value);
+  if (v("hxOther")) hx.push(v("hxOther"));
+  const meds = v("meds").split(/\n+/).map(s => s.trim()).filter(Boolean);
+  const allergy = v("allergy");
+
+  const flags = [];
+  if (spo2 !== null && spo2 < 95) flags.push(["crit", `SpO₂ ${spo2}%（95%未満）`]);
+  if (bt !== null && bt >= 37.5) flags.push([bt >= 38.5 ? "crit" : "warn", `発熱 ${bt.toFixed(1)}℃`]);
+  if (sbp !== null && sbp >= 180 || dbp !== null && dbp >= 110) flags.push(["crit", "血圧高値"]);
+  else if (sbp !== null && sbp >= 140 || dbp !== null && dbp >= 90) flags.push(["warn", "血圧やや高め"]);
+  if (hr !== null && (hr >= 100 || hr < 50)) flags.push(["warn", `脈拍 ${hr}回/分`]);
+  if (nrs >= 7) flags.push(["crit", `つらさ ${nrs}/10`]);
+  if (allergy && !/^(なし|無し|ない)$/.test(allergy)) flags.push(["crit", "アレルギーあり"]);
+  if (meds.some(m => anticoag.some(a => m.includes(a)))) flags.push(["warn", "抗凝固・抗血小板薬内服"]);
+  if (female && $("preg").value === "あり") flags.push(["crit", "妊娠の可能性あり"]);
+  if (female && $("preg").value === "わからない") flags.push(["warn", "妊娠の可能性不明"]);
+  if (bi >= 400) flags.push(["warn", `ブリンクマン指数 ${bi}`]);
+  if (age !== null && age >= 65) flags.push(["warn", "65歳以上"]);
+  if (v("course") === "悪くなっている") flags.push(["warn", "症状が増悪中"]);
+
+  $("flags").innerHTML = flags.length
+    ? flags.map(([k, t]) => `<span class="chip ${k}">${esc(t)}</span>`).join("")
+    : `<span class="chip ok">特に目立つ注意点はありません</span>`;
+
+  const hi = (val, cond, txt) => val === null ? "—" : `<span class="${cond ? "hi" : ""}">${txt}</span>`;
+  const vit = [
+    `BT ${hi(bt, bt >= 37.5, bt?.toFixed(1))}℃`,
+    `BP ${hi(sbp, sbp >= 140, sbp)}/${hi(dbp, dbp >= 90, dbp)}`,
+    `HR ${hi(hr, hr >= 100 || hr < 50, hr)}`,
+    `SpO₂ ${hi(spo2, spo2 < 95, spo2)}%`
+  ].join("　");
+
+  const smoke = cig > 0 ? `喫煙 ${cig}本/日 × ${cigY}年（BI ${bi}）` : "喫煙なし";
+  const hpi = [v("onset"), v("cc") && `${v("cc")}あり`, v("course"), v("detail"), `NRS ${nrs}/10`].filter(Boolean).join("。").replace(/。。/g, "。");
+
+  const rows = [
+    ["患者", `${age ?? "—"}歳 ${v("sex")}${female && $("preg").value ? `（妊娠の可能性：${$("preg").value}）` : ""}`],
+    ["主訴", v("cc")],
+    ["現病歴", hpi],
+    ["バイタル", vit, true],
+    ["既往歴", hx.join("、")],
+    ["内服薬", meds.join(" / ")],
+    ["アレルギー", allergy || "なし"],
+    ["生活歴", `${smoke}、飲酒 ${v("alc")}`],
+  ];
+  $("dl").innerHTML = rows.map(([k, val, raw]) =>
+    `<dt>${k}</dt><dd class="${val ? "" : "empty"}${raw ? " vitals" : ""}">${val ? (raw ? val : esc(val)) : "未入力"}</dd>`).join("");
+
+  const plainVit = `BT ${bt ?? "—"}℃ BP ${sbp ?? "—"}/${dbp ?? "—"} HR ${hr ?? "—"} SpO2 ${spo2 ?? "—"}%`;
+  $("txt").textContent = [
+    `【問診サマリー】`,
+    ...rows.map(([k, val, raw]) => `■${k}：${raw ? plainVit : (val || "未入力")}`),
+    flags.length ? `■注意：${flags.map(f => f[1]).join("、")}` : ""
+  ].filter(Boolean).join("\n");
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+/* 入力途中の内容をこの端末に一時保存（閉じても残る） */
+const DRAFT_KEY = "monshin-draft-v1";
+function saveDraft() {
+  const d = {};
+  document.querySelectorAll("#f [id]").forEach(el => {
+    if (el.matches("input, select, textarea")) d[el.id] = el.value;
+  });
+  d.hx = [...document.querySelectorAll("#hx input")].map(i => i.checked);
+  try { localStorage.setItem(DRAFT_KEY, JSON.stringify(d)); } catch (e) {}
+}
+function loadDraft() {
+  let d = null;
+  try { d = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null"); } catch (e) {}
+  if (!d) return;
+  Object.entries(d).forEach(([id, val]) => { const el = document.getElementById(id); if (el && id !== "hx") el.value = val; });
+  if (Array.isArray(d.hx)) document.querySelectorAll("#hx input").forEach((i, k) => { i.checked = !!d.hx[k]; });
+}
+$("f").addEventListener("input", () => { build(); saveDraft(); });
+$("f").addEventListener("change", () => { build(); saveDraft(); });
+$("f").addEventListener("submit", e => e.preventDefault());
+$("copy").addEventListener("click", () => {
+  const t = $("txt").textContent;
+  const done = () => { $("toast").textContent = "コピーしました。カルテに貼り付けてください。"; setTimeout(() => $("toast").textContent = "", 2500); };
+  try {
+    navigator.clipboard.writeText(t).then(done, fallback);
+  } catch (e) { fallback(); }
+  function fallback() {
+    $("txt").closest("details").open = true;
+    const r = document.createRange(); r.selectNodeContents($("txt"));
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    $("toast").textContent = "テキストを選択しました。長押しまたは Ctrl+C でコピーしてください。";
+  }
+});
+$("clear").addEventListener("click", () => {
+  document.querySelectorAll("#f input:not([type=range]):not([type=checkbox]), #f textarea").forEach(el => el.value = "");
+  document.querySelectorAll("#f input[type=checkbox]").forEach(el => el.checked = false);
+  $("nrs").value = 0; $("preg").value = "";
+  try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+  build();
+});
+loadDraft();
+build();
+</script>
+</body>
+</html>
