@@ -67,11 +67,38 @@ def strip_voicing(reading: str) -> str:
 
 PARTICLE_MID = re.compile(r"[^\u3040-\u309f][はがをにのでともへや][^\u3040-\u309f]")
 HIRAGANA_ANY = re.compile(r"[\u3040-\u309f]")
+PARTICLE_START = re.compile(r"[はがをにのでともへや]")
 PARTICLE_END = re.compile(r"[はがをにのでともへや]$")
 HIRAGANA_END = re.compile(r"[\u3040-\u309f]$")
 KANJI = re.compile(r"[\u4e00-\u9fff]")
 HIRAGANA_START = re.compile(r"^[\u3040-\u309f]")
 HIRAGANA_ONLY = re.compile(r"^[\u3040-\u309fー、。,.？！?!\s]*$")
+KANJI_WORD = re.compile(r"^[\u4e00-\u9fff]{2,}$")
+# 区切りに入っていたら対象外にする記号(話者ラベル・句読点・括弧・中黒など)
+SEPARATORS = re.compile(r"[：:、。，．,.？！?!\s（）()「」『』【】\[\]・…〜~]")
+
+
+def shared_part_ok(reading: str, term_reading: str) -> bool:
+    """読みに共通部分(3文字以上)があるとき、その位置から見て候補として妥当か。
+    共通部分があると全体の読みの近さが水増しされるので、次の2つは候補にしない。
+      - 共通部分が末尾どうし(「定期検査」→「髄液検査」の けんさ)で、残りの音が近くない。
+        末尾の語(検査・療法など)が同じだけで、前の語は全く別の語であることが多い
+      - 共通部分が片方では先頭、もう片方では末尾(「コント生活習慣」→「生活習慣病」)
+    先頭どうしが共通(「眼球として」→「眼球突出」「パセド病」→「バセドウ病」)なら残す。
+    読みは区切り全体で比べる(漢字の一部だけを読み変換すると「ヨウ素」→「ようもと」のように読み違えるため)。"""
+    a, b = strip_voicing(reading), strip_voicing(term_reading)
+    m = difflib.SequenceMatcher(None, a, b, autojunk=False).find_longest_match(0, len(a), 0, len(b))
+    if m.size < 3:
+        return True
+    start_a, start_b = m.a == 0, m.b == 0
+    end_a, end_b = m.a + m.size == len(a), m.b + m.size == len(b)
+    whole = (start_a and end_a) or (start_b and end_b)  # 片方の読みがまるごと共通部分(「失意上昇」→「脂質異常症」)
+    if not whole and ((start_a and end_b and not start_b) or (start_b and end_a and not start_a)):
+        return False
+    if end_a and end_b and not (start_a or start_b):
+        rest_a, rest_b = a[: m.a], b[: m.b]
+        return difflib.SequenceMatcher(None, rest_a, rest_b).ratio() >= 0.5
+    return True
 
 
 def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_tokens: int = 6) -> list:
@@ -115,13 +142,20 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
             if j > i and HIRAGANA_ONLY.match(tok) and len(tok) > 2:
                 base_s, base_r = surface[: -len(tok)], reading[: -len(toks[j][1])]
                 variants += [(base_s + tok[:k], base_r + tok[:k]) for k in range(2, len(tok))]
+            # 一部だけ付けたひらがな(「厚がり」の がり)は、用語がその同じかなで終わるか、切った後ろが助詞で
+            # 始まる(「眼球として|があります」)場合だけ候補にする。「食欲はむし|ろ」→「食欲不振」
+            # 「生活習慣につ|いて」→「生活習慣病」のように、語の途中で切った区切りを別の用語に取り違えないため
+            partial = {}
+            for surface_v, _ in variants[1:]:
+                piece = surface_v[len(surface) - len(tok) :]
+                partial[surface_v] = (piece, PARTICLE_START.match(tok[len(piece) :]) is not None)
             for surface_v, reading_v in variants:
                 # 前後のひらがなを除いた中心部分(「なる症状」→「症状」)も、用語・除外語なら対象外
                 core = re.sub(r"^[\u3040-\u309f]+|[\u3040-\u309f]+$", "", surface_v)
                 if len(reading_v) < 3 or len(surface_v) < 2 or HIRAGANA_ONLY.match(surface_v) or surface_v in term_set or core in term_set:
                     continue
-                if re.search(r"[：:、。？！?!\s]", surface_v):
-                    continue  # 話者ラベルや句読点をまたぐ区切りは対象外
+                if SEPARATORS.search(surface_v):
+                    continue  # 話者ラベル・句読点・括弧をまたぐ区切りは対象外
                 if protected & set(range(starts[i], starts[i] + len(surface_v))):
                     continue
                 cands = set()
@@ -129,6 +163,8 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
                     cands |= index.get(reading_v[k : k + 2], set())
                 for idx in cands:
                     term, term_reading = entries[idx]
+                    if surface_v in partial and not (partial[surface_v][1] or term.endswith(partial[surface_v][0])):
+                        continue
                     if abs(len(term_reading) - len(reading_v)) > 2 or term in surface_v or surface_v in term:
                         continue
                     # 数字は会話の内容そのもの(「1週間前」→「就寝前」のような置き換えを防ぐ)。
@@ -142,7 +178,9 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
                     if PARTICLE_END.search(surface_v) and not HIRAGANA_END.search(term):
                         continue
                     # 「甲状腺にホルモン」→「甲状腺ホルモン」のように、助詞をはさんだ2語を1語にしない
-                    if PARTICLE_MID.search(surface_v) and not HIRAGANA_ANY.search(term):
+                    # 用語にひらがなが入っていても、その助詞そのものが無ければ同じ(「薬で治療」→「お薬手帳」)
+                    mid = PARTICLE_MID.search(surface_v)
+                    if mid and mid.group(0)[1] not in term:
                         continue
                     ratio = difflib.SequenceMatcher(None, reading_v, term_reading).ratio()
                     # 読みが同じ(濁点・半濁点の違いだけも含む)なら、以下の「読みが完全一致する場合だけ」の条件を満たす
@@ -164,6 +202,13 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
                     # 送り仮名の付いた単語(「応じ」「話し」)に助詞などが続いただけの区切り(「応じて」)も同じ扱い
                     kanji_toks = [t for t, _ in toks[i : j + 1] if KANJI.search(t)]
                     if not same and len(kanji_toks) == 1 and HIRAGANA_ANY.search(kanji_toks[0]):
+                        continue
+                    # 漢字2文字以上の普通の単語に活用語尾などのひらがなが続いただけの区切り(「服用し」→「副作用」)も同じ扱い。
+                    # 用語がその単語で始まる場合(「眼球として」→「眼球突出」)は、後ろのひらがなが誤りなので残す
+                    k0 = kanji_toks[0] if len(kanji_toks) == 1 else ""
+                    if not same and KANJI_WORD.match(k0) and surface_v.startswith(k0) and not term.startswith(k0):
+                        continue
+                    if not same and not shared_part_ok(reading_v, term_reading):
                         continue
                     # 用語の一部になっている言葉(「心房細動」の「心房」)はそれ自体が正しい語なので、
                     # 読みが少し違うだけの別の用語(「心臓」)に置き換えない。読みが完全一致する場合は残す
