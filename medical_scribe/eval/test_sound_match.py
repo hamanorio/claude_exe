@@ -39,6 +39,8 @@ SHOULD_SUGGEST = {
     # 濁点・半濁点の違いだけ(辞書にある普通の単語でも候補にする)
     "安定する感慨という状態": ("感慨", "寛解"),
     "パセドウ病と診断します": ("パセドウ病", "バセドウ病"),
+    # 文字化け(�)の後ろでも位置がずれず、落ちないこと(Whisperが壊れた文字を出すことがある)
+    "婦人科で\ufffdしい検査です。3日前から甲状腺の主題があります": ("主題", "腫大"),
 }
 
 # 候補が出てはいけない(正しい日本語・正しく書かれた用語)
@@ -62,6 +64,10 @@ def main() -> None:
         got = [(m[2], m[3]) for m in sm.find_sound_alike(text, entries, index, term_set)]
         if expected not in got:
             failures.append(f"候補が出ない: 「{text}」 期待 {expected[0]}→{expected[1]} / 実際 {got}")
+        # 候補の位置が本文の該当箇所を指していること(置き換えはこの位置で行う)
+        for m in sm.find_sound_alike(text, entries, index, term_set):
+            if text[m[0] : m[1]] != m[2]:
+                failures.append(f"候補の位置がずれている: 「{text}」 {m[2]} が {m[0]}-{m[1]} ({text[m[0]:m[1]]})")
     for text in SHOULD_NOT_SUGGEST:
         got = [(m[2], m[3]) for m in sm.find_sound_alike(text, entries, index, term_set)]
         if got:

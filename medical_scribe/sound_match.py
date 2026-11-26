@@ -93,8 +93,13 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
     starts, pos = [], 0
     for surf, _ in toks:
         found_at = text.find(surf, pos)
-        starts.append(found_at if found_at >= 0 else pos)
-        pos = starts[-1] + len(surf)
+        if found_at >= 0:
+            starts.append(found_at)
+            pos = found_at + len(surf)
+        else:
+            # 読み変換が元と違う表記を返した(文字化けした「�」など)。位置を進めずにおく。
+            # 進めると後ろの語がすべて見つからなくなり、文字の位置が本文の外にずれる
+            starts.append(min(pos, len(text)))
 
     found = []
     for i in range(len(toks)):
@@ -131,7 +136,7 @@ def find_sound_alike(text: str, entries: list, index: dict, term_set: set, max_t
                     if re.search(r"[0-9０-９]", surface_v) and not re.search(r"[0-9０-９]", term):
                         continue
                     # 数字の直後から始まる区切り(「1週間前」の「週間前」)は単位なので対象外
-                    if starts[i] > 0 and re.match(r"[0-9０-９]", text[starts[i] - 1]) and not re.search(r"[0-9０-９]", term):
+                    if 0 < starts[i] <= len(text) and re.match(r"[0-9０-９]", text[starts[i] - 1]) and not re.search(r"[0-9０-９]", term):
                         continue
                     # 「脈は」→「脈拍」のように、助詞で終わる区切りを漢字で終わる用語と取り違えない
                     if PARTICLE_END.search(surface_v) and not HIRAGANA_END.search(term):

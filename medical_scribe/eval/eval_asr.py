@@ -31,6 +31,8 @@
 エンジンの書き方:
   mlx:medium / mlx:large-v3 / mlx:large-v3-turbo  … mlx-whisper(アプリの初期設定は large-v3-turbo)
   kotoba                                           … kotoba-whisper v2.0(日本語特化)
+  hf:<Hugging Faceのモデル名>                       … transformers で動かす Whisper 系モデル
+                                                     (例: hf:kenrouse/whisper-large-v3-turbo-medical-ja)
 """
 
 import argparse
@@ -87,34 +89,38 @@ def transcribe(engine: str, audio_path: str, hint: str) -> str:
         )
         return result["text"]
     if engine == "kotoba":
-        return transcribe_kotoba(audio_path)
-    raise ValueError(f"不明なエンジン: {engine}(mlx:large-v3-turbo / kotoba などを指定)")
+        return transcribe_hf(audio_path, KOTOBA_MODEL)
+    if engine.startswith("hf:"):
+        return transcribe_hf(audio_path, engine[len("hf:") :])
+    raise ValueError(f"不明なエンジン: {engine}(mlx:large-v3-turbo / kotoba / hf:<モデル名> などを指定)")
 
 
-_kotoba_pipe = None
+_hf_pipes = {}
 
 
-def transcribe_kotoba(audio_path: str) -> str:
-    global _kotoba_pipe
+def transcribe_hf(audio_path: str, model_id: str) -> str:
+    """Hugging Face の Whisper 系モデルを transformers で動かす(kotoba や医療向けに学習し直したモデル)。"""
     import subprocess
 
     import numpy as np
 
-    if _kotoba_pipe is None:
+    if model_id not in _hf_pipes:
         import torch
         from transformers import pipeline
 
+        _hf_pipes.clear()  # 16GBのMacで2つ載せないよう、前のモデルは手放す
         device = "mps" if torch.backends.mps.is_available() else "cpu"
-        _kotoba_pipe = pipeline(
+        _hf_pipes[model_id] = pipeline(
             "automatic-speech-recognition",
-            model=KOTOBA_MODEL,
+            model=model_id,
             torch_dtype=torch.float16 if device == "mps" else torch.float32,
             device=device,
         )
+    pipe = _hf_pipes[model_id]
     cmd = ["ffmpeg", "-nostdin", "-i", audio_path, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"]
     raw = subprocess.run(cmd, capture_output=True, check=True).stdout
     audio = np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0
-    out = _kotoba_pipe(
+    out = pipe(
         {"raw": audio, "sampling_rate": 16000},
         chunk_length_s=15,
         batch_size=1,
@@ -271,7 +277,7 @@ def main() -> None:
             print(f"[{case}] 正解の {case}.txt がないので飛ばします(--draft で下書きを作れます)")
             continue
         for k, engine in enumerate(args.engines):
-            hyp_path = os.path.join(hyp_dir, f"{case}__{engine.replace(':', '_')}.txt")
+            hyp_path = os.path.join(hyp_dir, f"{case}__{engine.replace(':', '_').replace('/', '_')}.txt")
             if args.reuse and os.path.exists(hyp_path):
                 with open(hyp_path, encoding="utf-8") as fh:
                     hyp_text = fh.read()
