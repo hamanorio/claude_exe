@@ -1085,6 +1085,7 @@ DEFAULT_SOUND_TERMS = """診察 問診 触診 聴診 視診 打診 皮膚 発汗
 # 同じフォルダの sound_match.py を、どこから起動しても読み込めるようにする
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ddx_agents  # noqa: E402
+import review_log  # noqa: E402
 import sound_match  # noqa: E402
 from sound_match import (  # noqa: E402
     apply_sound_replacements,
@@ -1505,6 +1506,14 @@ with st.sidebar:
         "③の採用・却下や④を見ている間に進むので、⑤で待つ時間が減ります。"
         "③で修正を採用した場合などは、⑤で抽出し直せます。",
     )
+    save_review_log = st.checkbox(
+        "確認記録を残す",
+        value=True,
+        help="「カルテ下書きを作成する」を押したときに、①-2・③・④の候補を採用したか却下したか、"
+        "⑤⑥でどう直したかを medical_scribe/review_logs/ にJSONで保存します(Macの外には送りません)。"
+        "集計は eval/review_stats.py で行い、①-2の除外語や照合の規則を直す材料にします。"
+        "会話の内容が含まれるので、不要になったら削除してください。",
+    )
     enable_diarization = st.checkbox("話者分離を行う(医師/患者の区別)")
     hf_token = st.text_input("Hugging Face トークン(話者分離用)", type="password") if enable_diarization else None
 
@@ -1523,6 +1532,9 @@ if uploaded_file:
         unload_all_ollama()
         with st.spinner(f"{whisper_engine}で文字起こし中...(初回はモデルのダウンロードに時間がかかります)"):
             st.session_state.result = transcribe(audio_path, medical_terms, model_size, whisper_engine)
+        # 確認記録はこの文字起こし1回につき1ファイル(ファイル名に録音の名前は使わない)
+        st.session_state.review_session = review_log.new_session_id(review_log.audio_id(uploaded_file.getvalue()))
+        st.session_state.review_asr = {"engine": whisper_engine, "model": model_size, "hint": medical_terms}
         if whisper_engine == "kotoba-whisper(日本語特化)":
             # 文字起こし用のモデルをメモリから外し、②以降のSwallowに空ける(16GBのMac向け)
             load_kotoba_pipeline.clear()
@@ -1543,6 +1555,7 @@ if uploaded_file:
         st.session_state.pop("speaker_labeled_text_box", None)
         st.session_state.pop("chart_draft", None)
         st.session_state.pop("bg_findings", None)
+        st.session_state.pop("review_log_path", None)
 
         if enable_diarization:
             if not hf_token:
@@ -1639,6 +1652,7 @@ if uploaded_file:
 
         sound_key = abs(hash(result["text"])) % 10**8
         accepted_pairs = set()
+        pair_list = []
         if not pairs:
             st.info("用語リストと音が近い表記ゆれは見つかりませんでした。")
         else:
@@ -1656,6 +1670,18 @@ if uploaded_file:
                     accepted_pairs.add((surface, term))
             st.caption(f"採用 {len(accepted_pairs)} 件 / 全 {len(pair_list)} 件")
 
+        sound_log = [
+            {
+                "surface": surface,
+                "term": term,
+                "ratio": round(info["ratio"], 3),
+                "count": info["count"],
+                "before": info["context"][0],
+                "after": info["context"][1],
+                "accepted": (surface, term) in accepted_pairs,
+            }
+            for (surface, term), info in pair_list
+        ]
         dict_segments = [
             {**seg, "text": apply_sound_replacements(seg["text"], matches, accepted_pairs)}
             for seg, matches in zip(dict_segments, seg_matches)
@@ -1795,6 +1821,16 @@ if uploaded_file:
                 st.caption(f"採用 {n_ok} 件 / 全 {len(change_ids)} 件(句読点のみの変更 {len(punct_ids)} 件は自動採用)")
 
             reviewed_text = build_reviewed_text(parts, accepted)
+            correction_log = [
+                {
+                    "old": parts[i][1],
+                    "new": parts[i][2],
+                    "before": "".join(p[1] for p in parts[:i])[-12:],
+                    "after": "".join(p[1] for p in parts[i + 1 :])[:12],
+                    "accepted": bool(accepted[i]),
+                }
+                for i in change_ids
+            ]
 
             st.divider()
             st.subheader("④ 不自然な表現のチェック")
@@ -1816,6 +1852,7 @@ if uploaded_file:
 
             checked_text = reviewed_text  # ④で採用した修正を反映した文章(⑤⑥はこれを使う)
             vague = st.session_state.get("vague_result")
+            vague_log = None
             if vague:
                 if st.session_state.get("vague_source", "").strip() != reviewed_text.strip():
                     st.caption("⚠️ ③の採用・却下が、このチェックをしたときから変わっています。必要ならもう一度チェックしてください。")
@@ -1853,6 +1890,16 @@ if uploaded_file:
                     else:
                         # 決めた形で答えなかったときは、出力をそのまま見せる
                         st.warning(vague["raw"])
+                vague_log = [
+                    {
+                        "phrase": f["phrase"],
+                        "suggestion": f["suggestion"],
+                        "reason": f["reason"],
+                        "count": f["count"],
+                        "accepted": bool(vague_accepted.get(i, False)) if i in fixable else None,
+                    }
+                    for i, f in enumerate(flags)
+                ]
                 with st.expander("④のLLMの出力全文"):
                     st.text(vague["raw"])
 
@@ -1992,6 +2039,39 @@ if uploaded_file:
                 ]
                 st.session_state.chart_draft = build_chart_draft(confirmed_findings)
                 st.session_state.confirmed_findings = confirmed_findings
+                if save_review_log and "review_session" in st.session_state:
+                    extracted = st.session_state.get("findings", [])
+                    reviewed = [
+                        {
+                            "item": st.session_state.get(f"finding_item_{fr}_{i}", f.get("item", "")),
+                            "laterality": st.session_state.get(f"finding_lat_{fr}_{i}", "不明"),
+                            "value": st.session_state.get(f"finding_val_{fr}_{i}", f.get("value", "")),
+                            "section": st.session_state.get(f"finding_sec_{fr}_{i}", SOAP_SECTIONS[0]),
+                            "excluded": st.session_state.get(f"finding_ex_{fr}_{i}", False),
+                        }
+                        for i, f in enumerate(extracted)
+                    ]
+                    try:
+                        st.session_state.review_log_path = review_log.save(
+                            st.session_state.review_session,
+                            {
+                                "asr": st.session_state.get("review_asr", {}),
+                                "llm": local_model_path or llm_backend,
+                                "term_files": selected_term_files,
+                                "asr_text": result["text"],
+                                "dict_applied": dict_applied,
+                                "sound_match": sound_log,
+                                "correction_ran": st.session_state.get("corrected") != st.session_state.get("correction_base"),
+                                "correction": correction_log,
+                                "vague": vague_log,
+                                "findings": review_log.finding_changes(extracted, reviewed),
+                                "checked_text": checked_text,
+                                "final_text": final_text,
+                                "final_edits": review_log.text_edits(checked_text, final_text),
+                            },
+                        )
+                    except OSError as e:
+                        st.warning(f"確認記録を保存できませんでした: {e}")
                 st.session_state.pop("ddx_output", None)
                 st.session_state.pop("ddx_history_box", None)
 
@@ -2003,6 +2083,8 @@ if uploaded_file:
                     "(確認していない言い換えが入らないよう、LLMで要約し直してはいません)。"
                     "A(評価)・P(計画)は医師が記入してください。"
                 )
+                if st.session_state.get("review_log_path"):
+                    st.caption(f"📒 確認記録を保存しました: review_logs/{os.path.basename(st.session_state.review_log_path)}")
                 draft = st.text_area("カルテ下書き", st.session_state.chart_draft, height=400)
                 st.download_button(
                     "テキストファイルとして保存",
