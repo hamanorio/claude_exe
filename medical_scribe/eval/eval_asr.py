@@ -33,6 +33,8 @@
   kotoba                                           … kotoba-whisper v2.0(日本語特化)
   hf:<Hugging Faceのモデル名>                       … transformers で動かす Whisper 系モデル
                                                      (例: hf:kenrouse/whisper-large-v3-turbo-medical-ja)
+  openai:gpt-transcribe / openai:gpt-4o-transcribe   … OpenAIの音声認識API(音声が外部に送られる。
+                                                     環境変数 OPENAI_API_KEY が必要。テスト用の録音のみ)
 """
 
 import argparse
@@ -88,6 +90,10 @@ def transcribe(engine: str, audio_path: str, hint: str) -> str:
             condition_on_previous_text=False,
         )
         return result["text"]
+    if engine.startswith("openai:"):
+        import openai_asr
+
+        return openai_asr.transcribe_text(audio_path, hint, model=engine[len("openai:") :])
     if engine == "kotoba":
         return transcribe_hf(audio_path, KOTOBA_MODEL)
     if engine.startswith("hf:"):

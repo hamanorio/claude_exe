@@ -445,8 +445,24 @@ def release_mlx_whisper() -> None:
         pass  # 解放できなくても文字起こしの結果には影響しない
 
 
-def transcribe(audio_path: str, medical_terms: str, model_size: str, engine: str = "openai-whisper"):
+OPENAI_ASR_ENGINE = "OpenAI API(gpt-transcribe)"
+
+
+def transcribe_openai_api(audio_path: str, medical_terms: str, model: str, api_key: str) -> dict:
+    """OpenAIの音声認識APIで文字起こしし、Whisperと同じ形({"text", "segments"})にそろえる。
+    APIは本文しか返さないので、セグメントの時刻は概算、信頼度は「なし」になる。
+    """
+    import openai_asr
+
+    text = openai_asr.transcribe_text(audio_path, medical_terms, model=model, api_key=api_key)
+    duration = len(load_audio_16k(audio_path)) / 16000
+    return {"text": text, "segments": openai_asr.to_segments(text, duration)}
+
+
+def transcribe(audio_path: str, medical_terms: str, model_size: str, engine: str = "openai-whisper", api_key: str = ""):
     initial_prompt = f"これは医師と患者の診察会話です。次のような医学用語が含まれます: {medical_terms}"
+    if engine == OPENAI_ASR_ENGINE:
+        return transcribe_openai_api(audio_path, medical_terms, model_size, api_key)
     if engine == "kotoba-whisper(日本語特化)":
         return transcribe_kotoba(audio_path, model_size)
     if engine == "mlx-whisper":
@@ -1404,14 +1420,26 @@ with st.sidebar:
     st.header("設定")
     whisper_engine = st.radio(
         "音声認識エンジン",
-        ["openai-whisper", "mlx-whisper", "kotoba-whisper(日本語特化)"],
-        # Apple Silicon の Mac では mlx-whisper を初期選択にする(再起動のたびに選び直さなくて済むように)
-        index=1 if IS_APPLE_SILICON else 0,
+        ["openai-whisper", "mlx-whisper", "kotoba-whisper(日本語特化)", OPENAI_ASR_ENGINE],
+        # 初期選択は gpt-transcribe(試した録音でWhisperより誤りが少なかったため)。
+        # 音声がOpenAIに送られるので、実在する患者の録音では mlx-whisper 等のローカルに切り替えること
+        index=3,
         help="Mac(Apple Silicon)では mlx-whisper の方が大幅に速く動きます。"
         "kotoba-whisper は日本語の音声で学習し直したモデルで、日本語の誤変換が減る可能性があります"
-        "(要 `pip install transformers torch`)。同じ音声で切り替えて①を実行すると比較できます。",
+        "(要 `pip install transformers torch`)。同じ音声で切り替えて①を実行すると比較できます。"
+        "gpt-transcribe は音声をOpenAIのサーバーに送ります(テスト用の録音のみに使ってください)。",
     )
-    if whisper_engine == "kotoba-whisper(日本語特化)":
+    asr_api_key = ""
+    if whisper_engine == OPENAI_ASR_ENGINE:
+        model_size = st.selectbox("OpenAIの音声認識モデル", ["gpt-transcribe", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"])
+        asr_api_key = st.text_input(
+            "OpenAI APIキー(文字起こし用)",
+            type="password",
+            help="空欄なら環境変数 OPENAI_API_KEY を使います。",
+        )
+        st.warning("音声がOpenAIのサーバーに送られます。実在する患者の録音には使わないでください。")
+        st.caption("※ このAPIは区間ごとの時刻・信頼度を返しません。セグメントの時刻は文字数から見積もった概算です。")
+    elif whisper_engine == "kotoba-whisper(日本語特化)":
         model_size = st.text_input(
             "kotoba-whisperのモデル",
             KOTOBA_DEFAULT_MODEL,
@@ -1531,7 +1559,9 @@ if uploaded_file:
     if st.button("① 文字起こしを実行", type="primary"):
         unload_all_ollama()
         with st.spinner(f"{whisper_engine}で文字起こし中...(初回はモデルのダウンロードに時間がかかります)"):
-            st.session_state.result = transcribe(audio_path, medical_terms, model_size, whisper_engine)
+            st.session_state.result = transcribe(
+                audio_path, medical_terms, model_size, whisper_engine, asr_api_key or api_key
+            )
         # 確認記録はこの文字起こし1回につき1ファイル(ファイル名に録音の名前は使わない)
         st.session_state.review_session = review_log.new_session_id(review_log.audio_id(uploaded_file.getvalue()))
         st.session_state.review_asr = {"engine": whisper_engine, "model": model_size, "hint": medical_terms}
@@ -1584,7 +1614,7 @@ if uploaded_file:
             col1, col2 = st.columns([9, 1])
             with col1:
                 st.markdown(
-                    f"{speaker_html}{badge}&nbsp;&nbsp;`{seg['start']:.1f}s - {seg['end']:.1f}s`&nbsp;&nbsp;{seg['text']}",
+                    f"{speaker_html}{badge}&nbsp;&nbsp;`{'約' if seg.get('approx_time') else ''}{seg['start']:.1f}s - {seg['end']:.1f}s`&nbsp;&nbsp;{seg['text']}",
                     unsafe_allow_html=True,
                 )
             with col2:
